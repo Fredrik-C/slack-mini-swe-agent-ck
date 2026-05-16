@@ -4,6 +4,7 @@ import re
 import shlex
 import subprocess
 import threading
+import time
 import uuid
 import json
 import fnmatch
@@ -45,6 +46,8 @@ REPO_CONFIG_PATH = os.getenv("REPO_CONFIG_PATH", "repos.json")
 WORKTREE_ROOT = os.getenv("WORKTREE_ROOT", ".worktrees")
 GIT_FETCH_BEFORE_WORKTREE = _bool_env("GIT_FETCH_BEFORE_WORKTREE", True)
 KEEP_WORKTREE_ON_FAILURE = _bool_env("KEEP_WORKTREE_ON_FAILURE", False)
+PROGRESS_HEARTBEAT_SECONDS = int(os.getenv("PROGRESS_HEARTBEAT_SECONDS", "0"))
+STATUS_OUTPUT_CHARS = int(os.getenv("STATUS_OUTPUT_CHARS", "1200"))
 MSWEA_CONFIGURED = os.getenv("MSWEA_CONFIGURED", "true").strip()
 PLAN_GUIDE_PATH = os.getenv("PLAN_GUIDE_PATH", "prompts/planning.md")
 REVIEW_GUIDE_PATH = os.getenv("REVIEW_GUIDE_PATH", "prompts/review.md")
@@ -58,6 +61,21 @@ app = App(token=SLACK_BOT_TOKEN)
 task_queue: "queue.Queue[dict[str, Any]]" = queue.Queue()
 pending_plans: dict[str, dict[str, Any]] = {}
 pending_plans_lock = threading.Lock()
+runtime_state_lock = threading.Lock()
+runtime_state: dict[str, Any] = {
+    "running": False,
+    "repo_alias": "",
+    "branch": "",
+    "stage": "idle",
+    "stage_since": 0.0,
+    "worktree": "",
+    "command": "",
+    "last_update": 0.0,
+    "last_status": "idle",
+    "last_error": "",
+    "last_stdout": "",
+    "last_stderr": "",
+}
 
 
 def _run_quiet(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -126,6 +144,11 @@ def _is_help_command(payload: str) -> bool:
     return normalized in {"help", "usage", "commands"}
 
 
+def _is_status_command(payload: str) -> bool:
+    normalized = " ".join(payload.lower().split())
+    return normalized in {"status", "state", "progress", "last output", "output"}
+
+
 def _repo_listing_message() -> str:
     default_repo = REPO_CONFIG.get("default_repo", "")
     lines = [f"Configured repos (default=`{default_repo}`):"]
@@ -144,6 +167,7 @@ def _help_message() -> str:
     lines = [
         "Commands:",
         "- `repos` or `list repos`: show allowed repo aliases and branch patterns",
+        "- `status`: show current run stage, queue depth, and latest output/error",
         "- `help`: show this message",
         "- During planning clarifications: reply in-thread with `@bot <answers>` or `@bot cancel`",
         "",
@@ -152,6 +176,52 @@ def _help_message() -> str:
         "- `branch=` is optional (uses repo default branch)",
         "- `repo=` is optional (uses `default_repo`)",
     ]
+    return "\n".join(lines)
+
+
+def _set_runtime_state(**kwargs: Any) -> None:
+    with runtime_state_lock:
+        runtime_state.update(kwargs)
+        runtime_state["last_update"] = time.time()
+
+
+def _snapshot_runtime_state() -> dict[str, Any]:
+    with runtime_state_lock:
+        return dict(runtime_state)
+
+
+def _status_message() -> str:
+    state = _snapshot_runtime_state()
+    queued = task_queue.qsize()
+    pending = len(pending_plans)
+    running = bool(state.get("running"))
+    stage = str(state.get("stage", "unknown"))
+    last_status = str(state.get("last_status", "unknown"))
+    repo_alias = str(state.get("repo_alias", ""))
+    branch = str(state.get("branch", ""))
+    worktree = str(state.get("worktree", ""))
+    command = str(state.get("command", ""))
+    last_error = _tail(str(state.get("last_error", "")), STATUS_OUTPUT_CHARS)
+    last_stdout = _tail(str(state.get("last_stdout", "")), STATUS_OUTPUT_CHARS)
+    last_stderr = _tail(str(state.get("last_stderr", "")), STATUS_OUTPUT_CHARS)
+    stage_since = float(state.get("stage_since", 0.0) or 0.0)
+    elapsed = int(max(0, time.time() - stage_since)) if stage_since else 0
+
+    lines = [
+        f"running=`{running}` stage=`{stage}` elapsed=`{elapsed}s`",
+        f"repo=`{repo_alias or '(none)'}` branch=`{branch or '(none)'}`",
+        f"queue=`{queued}` pending_clarifications=`{pending}` last_status=`{last_status}`",
+    ]
+    if worktree:
+        lines.append(f"worktree=`{worktree}`")
+    if command:
+        lines.append(f"command=`{command}`")
+    if last_error:
+        lines.append(f"last_error:\n```{last_error}```")
+    if last_stdout:
+        lines.append(f"last_stdout_tail:\n```{last_stdout}```")
+    if last_stderr:
+        lines.append(f"last_stderr_tail:\n```{last_stderr}```")
     return "\n".join(lines)
 
 
@@ -267,6 +337,52 @@ def _mini_env() -> dict[str, str]:
     env = os.environ.copy()
     env["MSWEA_CONFIGURED"] = MSWEA_CONFIGURED or "true"
     return env
+
+
+def _run_with_heartbeat(
+    cmd: list[str],
+    cwd: str,
+    env: dict[str, str],
+    timeout_seconds: int,
+    channel: str,
+    thread_ts: str,
+    stage_label: str,
+) -> subprocess.CompletedProcess[str]:
+    result: dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            result["proc"] = subprocess.run(
+                cmd,
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except Exception as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    start = time.time()
+    thread.start()
+
+    if PROGRESS_HEARTBEAT_SECONDS > 0:
+        while thread.is_alive():
+            thread.join(timeout=PROGRESS_HEARTBEAT_SECONDS)
+            if thread.is_alive():
+                elapsed = int(time.time() - start)
+                _post_thread(
+                    channel,
+                    thread_ts,
+                    f"Stage: {stage_label} (still running, {elapsed}s elapsed)",
+                )
+    else:
+        thread.join()
+
+    if "error" in result:
+        raise result["error"]
+    return result["proc"]
 
 
 def _answers_block(answers: list[str]) -> str:
@@ -444,7 +560,21 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
     wt_path = ""
     keep_worktree = False
     try:
+        _set_runtime_state(
+            running=True,
+            repo_alias=repo_alias,
+            branch=branch,
+            stage="preparing-worktree",
+            stage_since=time.time(),
+            worktree="",
+            command="",
+            last_status="running",
+            last_error="",
+            last_stdout="",
+            last_stderr="",
+        )
         wt_path, base_ref = _prepare_worktree(repo_path, branch)
+        _set_runtime_state(worktree=wt_path)
         _post_thread(
             channel,
             thread_ts,
@@ -463,17 +593,37 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
             planning_guide=workflow_docs["planning"],
         )
         planning_cmd = _build_command(planning_task)
-        planning_proc = subprocess.run(
-            planning_cmd,
+        _set_runtime_state(
+            stage="planning",
+            stage_since=time.time(),
+            command=shlex.join(planning_cmd),
+        )
+        _post_thread(
+            channel,
+            thread_ts,
+            f"Planning command: `{shlex.join(planning_cmd)}`",
+        )
+        planning_proc = _run_with_heartbeat(
+            cmd=planning_cmd,
             cwd=wt_path,
             env=_mini_env(),
-            capture_output=True,
-            text=True,
-            timeout=TASK_TIMEOUT_SECONDS,
+            timeout_seconds=TASK_TIMEOUT_SECONDS,
+            channel=channel,
+            thread_ts=thread_ts,
+            stage_label="planning",
         )
         if planning_proc.returncode != 0:
             stdout = _tail(planning_proc.stdout, MAX_STDOUT_CHARS)
             stderr = _tail(planning_proc.stderr, MAX_STDERR_CHARS)
+            _set_runtime_state(
+                running=False,
+                stage="planning-failed",
+                stage_since=time.time(),
+                last_status=f"failed (planning exit {planning_proc.returncode})",
+                last_error=f"Planning stage failed (exit {planning_proc.returncode}).",
+                last_stdout=stdout,
+                last_stderr=stderr,
+            )
             message = f"Planning stage failed (exit {planning_proc.returncode})."
             if stdout:
                 message += f"\n\nstdout:\n```{stdout}```"
@@ -510,6 +660,15 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
                     f"{question_lines}"
                 ),
             )
+            _set_runtime_state(
+                running=False,
+                stage="waiting-user-clarification",
+                stage_since=time.time(),
+                command="",
+                last_status="waiting_for_input",
+                last_stdout=_tail(planning_proc.stdout, MAX_STDOUT_CHARS),
+                last_stderr=_tail(planning_proc.stderr, MAX_STDERR_CHARS),
+            )
             return False, True, wt_path
 
         assumptions = plan_output["assumptions"]
@@ -527,17 +686,39 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
             plan_text=plan_text,
         )
         execute_cmd = _build_command(execute_task)
-        proc = subprocess.run(
-            execute_cmd,
+        _set_runtime_state(
+            stage="implementation",
+            stage_since=time.time(),
+            command=shlex.join(execute_cmd),
+            last_status="running",
+        )
+        _post_thread(
+            channel,
+            thread_ts,
+            f"Execution command: `{shlex.join(execute_cmd)}`",
+        )
+        proc = _run_with_heartbeat(
+            cmd=execute_cmd,
             cwd=wt_path,
             env=_mini_env(),
-            capture_output=True,
-            text=True,
-            timeout=TASK_TIMEOUT_SECONDS,
+            timeout_seconds=TASK_TIMEOUT_SECONDS,
+            channel=channel,
+            thread_ts=thread_ts,
+            stage_label="implementation",
         )
         stdout = _tail(proc.stdout, MAX_STDOUT_CHARS)
         stderr = _tail(proc.stderr, MAX_STDERR_CHARS)
         status = "completed" if proc.returncode == 0 else f"failed (exit {proc.returncode})"
+        _set_runtime_state(
+            running=False,
+            stage="completed" if proc.returncode == 0 else "execution-failed",
+            stage_since=time.time(),
+            command="",
+            last_status=status,
+            last_error="" if proc.returncode == 0 else f"Execution failed (exit {proc.returncode}).",
+            last_stdout=stdout,
+            last_stderr=stderr,
+        )
         message = f"Workflow run {status}."
         if stdout:
             message += f"\n\nstdout:\n```{stdout}```"
@@ -555,9 +736,25 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
             )
         return keep_worktree, False, wt_path
     except subprocess.TimeoutExpired:
+        _set_runtime_state(
+            running=False,
+            stage="timeout",
+            stage_since=time.time(),
+            command="",
+            last_status="timed_out",
+            last_error=f"Timed out after {TASK_TIMEOUT_SECONDS} seconds.",
+        )
         _post_thread(channel, thread_ts, f"Timed out after {TASK_TIMEOUT_SECONDS} seconds.")
         return False, False, wt_path
     except Exception as exc:
+        _set_runtime_state(
+            running=False,
+            stage="runner-error",
+            stage_since=time.time(),
+            command="",
+            last_status="runner_error",
+            last_error=str(exc),
+        )
         _post_thread(channel, thread_ts, f"Runner error: `{exc}`")
         return False, False, wt_path
 
@@ -574,6 +771,9 @@ def on_app_mention(event: dict[str, Any], say) -> None:
     pending = _peek_pending_plan(conversation_id) if conversation_id else None
     if pending is not None:
         normalized = " ".join(mention_text.lower().split())
+        if normalized in {"status", "state", "progress", "last output", "output"}:
+            say(thread_ts=pending["thread_ts"], text=_status_message())
+            return
         if normalized in {"cancel", "abort"}:
             _pop_pending_plan(conversation_id)
             say(thread_ts=pending["thread_ts"], text="Pending planning conversation canceled.")
@@ -619,6 +819,9 @@ def on_app_mention(event: dict[str, Any], say) -> None:
     if _is_help_command(payload):
         say(thread_ts=event.get("ts"), text=_help_message())
         return
+    if _is_status_command(payload):
+        say(thread_ts=event.get("ts"), text=_status_message())
+        return
 
     parsed = _parse_payload(payload)
     if not parsed["task"]:
@@ -646,6 +849,7 @@ def on_app_mention(event: dict[str, Any], say) -> None:
         "latest_reply": "",
     }
     task_queue.put(job)
+    _set_runtime_state(last_status="queued")
     say(
         thread_ts=event.get("ts"),
         text=(

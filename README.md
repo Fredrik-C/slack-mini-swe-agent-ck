@@ -190,6 +190,7 @@ Utility commands:
 
 - `@your-bot swe: repos`
 - `@your-bot swe: list repos`
+- `@your-bot swe: status` (alias: `state`, `progress`, `output`, `last output`)
 - `@your-bot swe: help`
 
 ## Optional: Run Without Docker
@@ -236,6 +237,8 @@ Environment variables in `.env`:
 - `MINI_USE_YOLO` (default: `true`): append `-y` for automatic execution.
 - `MSWEA_CONFIGURED` (recommended: `true`): disables mini's interactive first-time setup prompt for non-TTY Slack runs.
 - `TASK_TIMEOUT_SECONDS` (default: `7200`): timeout per task.
+- `PROGRESS_HEARTBEAT_SECONDS` (default: `0`): post in-thread "still running" updates while planning/execution is active (`0` disables).
+- `STATUS_OUTPUT_CHARS` (default: `1200`): max output tail included in `status` responses.
 - `MAX_STDOUT_CHARS` (default: `3500`): stdout tail sent back to Slack.
 - `MAX_STDERR_CHARS` (default: `1500`): stderr tail sent back to Slack.
 - `TASK_PREFIX` (optional): only accept tasks starting with this prefix.
@@ -286,3 +289,4 @@ Notes:
 - For safer operation, use `TASK_PREFIX`, `ALLOW_CHANNEL_IDS`, and strict `allowed_branches` patterns.
 - In Docker mode, repo paths inside `repos.json` must match container mount paths (default `/repos/...`).
 - In Docker mode, mounted paths must be writable by the selected `PUID`/`PGID`.
+- For live runtime visibility, use `docker compose logs -f` on the host while a Slack task is running.
