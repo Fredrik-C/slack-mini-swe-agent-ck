@@ -14,7 +14,7 @@ services:
       REPO_CONFIG_PATH: /app/repos.json
       WORKTREE_ROOT: /worktrees
       CHATGPT_TOKEN_DIR: /home/appuser/.config/litellm/chatgpt
-      GIT_SSH_COMMAND: ssh -i /home/appuser/.ssh/id_ed25519_mini_swe -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
+      GIT_SSH_COMMAND: ssh -i /home/appuser/.ssh/id_ed25519_mini_swe -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/home/appuser/.ssh/known_hosts
     volumes:
       - ./repos.json:/app/repos.json:ro
       - /srv/agent/repos:/repos
