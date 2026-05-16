@@ -21,17 +21,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG PUID=1000
 ARG PGID=1000
 
-RUN set -eux; \
-    if ! getent group "${PGID}" >/dev/null; then \
-        groupadd --gid "${PGID}" appgroup; \
-    fi; \
-    if ! getent group appgroup >/dev/null; then \
-        groupadd appgroup; \
-    fi; \
-    if ! id -u appuser >/dev/null 2>&1; then \
-        useradd --uid "${PUID}" --gid "${PGID}" --create-home --shell /bin/bash appuser; \
-    fi
-
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
@@ -39,8 +28,10 @@ RUN pip3 install --no-cache-dir --break-system-packages -r /app/requirements.txt
 
 COPY . /app
 
-RUN chown -R appuser:appgroup /app
+RUN mkdir -p /home/appuser \
+    && chown -R "${PUID}:${PGID}" /app /home/appuser
 
-USER appuser
+ENV HOME=/home/appuser
+USER ${PUID}:${PGID}
 
 CMD ["python3", "app.py"]
