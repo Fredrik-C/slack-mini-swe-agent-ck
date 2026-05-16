@@ -35,6 +35,7 @@ if not SLACK_APP_TOKEN.startswith("xapp-"):
 
 MINI_CMD = os.getenv("MINI_CMD", "mini")
 MINI_USE_YOLO = _bool_env("MINI_USE_YOLO", True)
+MINI_EXIT_IMMEDIATELY = _bool_env("MINI_EXIT_IMMEDIATELY", True)
 MINI_MODEL_CLASS = os.getenv("MINI_MODEL_CLASS", "").strip()
 MINI_MODEL_NAME = os.getenv("MINI_MODEL_NAME", "").strip()
 TASK_TIMEOUT_SECONDS = int(os.getenv("TASK_TIMEOUT_SECONDS", "7200"))
@@ -329,6 +330,8 @@ def _build_command(task: str) -> list[str]:
         cmd.extend(["-m", MINI_MODEL_NAME])
     if MINI_USE_YOLO:
         cmd.append("-y")
+    if MINI_EXIT_IMMEDIATELY:
+        cmd.append("--exit-immediately")
     cmd.extend(["-t", task])
     return cmd
 

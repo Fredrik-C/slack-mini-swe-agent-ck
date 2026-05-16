@@ -235,6 +235,7 @@ Environment variables in `.env`:
 - `MINI_MODEL_CLASS` (optional): model class flag passed to `mini` as `--model-class` (set `litellm_response` for ChatGPT responses route).
 - `MINI_MODEL_NAME` (optional): model name passed to `mini` as `-m` (for example `chatgpt/gpt-5.3-codex`).
 - `MINI_USE_YOLO` (default: `true`): append `-y` for automatic execution.
+- `MINI_EXIT_IMMEDIATELY` (default: `true`): append `--exit-immediately` so non-TTY runs do not block at REPL finish prompt.
 - `MSWEA_CONFIGURED` (recommended: `true`): disables mini's interactive first-time setup prompt for non-TTY Slack runs.
 - `TASK_TIMEOUT_SECONDS` (default: `7200`): timeout per task.
 - `PROGRESS_HEARTBEAT_SECONDS` (default: `0`): post in-thread "still running" updates while planning/execution is active (`0` disables).
