@@ -155,6 +155,10 @@ def _help_message() -> str:
 
 
 def _parse_payload(payload: str) -> dict[str, str]:
+    def _clean_selector(value: str) -> str:
+        # tolerate Slack punctuation like `repo=atg,`
+        return value.strip().strip(",.;:")
+
     tokens = shlex.split(payload)
     repo = ""
     branch = ""
@@ -162,10 +166,10 @@ def _parse_payload(payload: str) -> dict[str, str]:
     for token in tokens:
         lower = token.lower()
         if lower.startswith("repo=") and not repo:
-            repo = token.split("=", 1)[1].strip()
+            repo = _clean_selector(token.split("=", 1)[1])
             continue
         if lower.startswith("branch=") and not branch:
-            branch = token.split("=", 1)[1].strip()
+            branch = _clean_selector(token.split("=", 1)[1])
             continue
         task_tokens.append(token)
     return {"repo": repo, "branch": branch, "task": " ".join(task_tokens).strip()}
