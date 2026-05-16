@@ -45,6 +45,7 @@ REPO_CONFIG_PATH = os.getenv("REPO_CONFIG_PATH", "repos.json")
 WORKTREE_ROOT = os.getenv("WORKTREE_ROOT", ".worktrees")
 GIT_FETCH_BEFORE_WORKTREE = _bool_env("GIT_FETCH_BEFORE_WORKTREE", True)
 KEEP_WORKTREE_ON_FAILURE = _bool_env("KEEP_WORKTREE_ON_FAILURE", False)
+MSWEA_CONFIGURED = os.getenv("MSWEA_CONFIGURED", "true").strip()
 PLAN_GUIDE_PATH = os.getenv("PLAN_GUIDE_PATH", "prompts/planning.md")
 REVIEW_GUIDE_PATH = os.getenv("REVIEW_GUIDE_PATH", "prompts/review.md")
 WORKFLOW_GUIDE_PATH = os.getenv("WORKFLOW_GUIDE_PATH", "prompts/workflow.md")
@@ -262,6 +263,12 @@ def _build_command(task: str) -> list[str]:
     return cmd
 
 
+def _mini_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["MSWEA_CONFIGURED"] = MSWEA_CONFIGURED or "true"
+    return env
+
+
 def _answers_block(answers: list[str]) -> str:
     if not answers:
         return "(none)"
@@ -459,6 +466,7 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
         planning_proc = subprocess.run(
             planning_cmd,
             cwd=wt_path,
+            env=_mini_env(),
             capture_output=True,
             text=True,
             timeout=TASK_TIMEOUT_SECONDS,
@@ -522,6 +530,7 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
         proc = subprocess.run(
             execute_cmd,
             cwd=wt_path,
+            env=_mini_env(),
             capture_output=True,
             text=True,
             timeout=TASK_TIMEOUT_SECONDS,

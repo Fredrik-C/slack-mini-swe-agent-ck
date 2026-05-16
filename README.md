@@ -234,6 +234,7 @@ Environment variables in `.env`:
 - `MINI_MODEL_CLASS` (optional): model class flag passed to `mini` as `--model-class` (set `litellm_response` for ChatGPT responses route).
 - `MINI_MODEL_NAME` (optional): model name passed to `mini` as `-m` (for example `chatgpt/gpt-5.3-codex`).
 - `MINI_USE_YOLO` (default: `true`): append `-y` for automatic execution.
+- `MSWEA_CONFIGURED` (recommended: `true`): disables mini's interactive first-time setup prompt for non-TTY Slack runs.
 - `TASK_TIMEOUT_SECONDS` (default: `7200`): timeout per task.
 - `MAX_STDOUT_CHARS` (default: `3500`): stdout tail sent back to Slack.
 - `MAX_STDERR_CHARS` (default: `1500`): stderr tail sent back to Slack.
