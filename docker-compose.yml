@@ -20,4 +20,4 @@ services:
       - /srv/agent/repos:/repos
       - /srv/agent/worktrees:/worktrees
       - /srv/agent/chatgpt-auth:/home/appuser/.config/litellm/chatgpt
-      - /home/<ubuntu-user>/.ssh:/home/appuser/.ssh:ro
+      - /home/raytail/.ssh:/home/appuser/.ssh:ro
