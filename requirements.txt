@@ -1,0 +1,4 @@
+mini-swe-agent>=2.2.0
+slack-bolt>=1.26.0
+python-dotenv>=1.0.1
+

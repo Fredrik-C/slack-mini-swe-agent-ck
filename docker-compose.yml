@@ -1,0 +1,23 @@
+services:
+  mini-swe-slack:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
+    container_name: mini-swe-slack
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REPO_CONFIG_PATH: /app/repos.json
+      WORKTREE_ROOT: /worktrees
+      CHATGPT_TOKEN_DIR: /home/appuser/.config/litellm/chatgpt
+      GIT_SSH_COMMAND: ssh -i /home/appuser/.ssh/id_ed25519_mini_swe -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
+    volumes:
+      - ./repos.json:/app/repos.json:ro
+      - /srv/agent/repos:/repos
+      - /srv/agent/worktrees:/worktrees
+      - /srv/agent/chatgpt-auth:/home/appuser/.config/litellm/chatgpt
+      - /home/<ubuntu-user>/.ssh:/home/appuser/.ssh:ro
