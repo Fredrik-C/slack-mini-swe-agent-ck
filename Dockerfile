@@ -21,8 +21,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG PUID=1000
 ARG PGID=1000
 
-RUN groupadd --gid "${PGID}" appgroup \
-    && useradd --uid "${PUID}" --gid "${PGID}" --create-home --shell /bin/bash appuser
+RUN set -eux; \
+    if ! getent group "${PGID}" >/dev/null; then \
+        groupadd --gid "${PGID}" appgroup; \
+    fi; \
+    if ! getent group appgroup >/dev/null; then \
+        groupadd appgroup; \
+    fi; \
+    if ! id -u appuser >/dev/null 2>&1; then \
+        useradd --uid "${PUID}" --gid "${PGID}" --create-home --shell /bin/bash appuser; \
+    fi
 
 WORKDIR /app
 
