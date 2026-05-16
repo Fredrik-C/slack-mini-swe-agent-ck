@@ -29,7 +29,7 @@ RUN pip3 install --no-cache-dir --break-system-packages -r /app/requirements.txt
 
 COPY . /app
 
-RUN mkdir -p /home/appuser \
+RUN mkdir -p /home/appuser/.config/litellm \
     && chown -R "${PUID}:${PGID}" /app /home/appuser
 
 ENV HOME=/home/appuser
