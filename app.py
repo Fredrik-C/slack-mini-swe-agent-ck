@@ -45,12 +45,18 @@ REPO_CONFIG_PATH = os.getenv("REPO_CONFIG_PATH", "repos.json")
 WORKTREE_ROOT = os.getenv("WORKTREE_ROOT", ".worktrees")
 GIT_FETCH_BEFORE_WORKTREE = _bool_env("GIT_FETCH_BEFORE_WORKTREE", True)
 KEEP_WORKTREE_ON_FAILURE = _bool_env("KEEP_WORKTREE_ON_FAILURE", False)
+PLAN_GUIDE_PATH = os.getenv("PLAN_GUIDE_PATH", "prompts/planning.md")
+REVIEW_GUIDE_PATH = os.getenv("REVIEW_GUIDE_PATH", "prompts/review.md")
+WORKFLOW_GUIDE_PATH = os.getenv("WORKFLOW_GUIDE_PATH", "prompts/workflow.md")
+PLAN_OUTPUT_FILENAME = os.getenv("PLAN_OUTPUT_FILENAME", ".mini_workflow_plan.json")
 ALLOW_CHANNEL_IDS = {
     c.strip() for c in os.getenv("ALLOW_CHANNEL_IDS", "").split(",") if c.strip()
 }
 
 app = App(token=SLACK_BOT_TOKEN)
 task_queue: "queue.Queue[dict[str, Any]]" = queue.Queue()
+pending_plans: dict[str, dict[str, Any]] = {}
+pending_plans_lock = threading.Lock()
 
 
 def _run_quiet(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -72,6 +78,32 @@ def _load_repo_config() -> dict[str, Any]:
 
 
 REPO_CONFIG = _load_repo_config()
+
+
+def _read_required_text(path: str, label: str) -> str:
+    p = Path(path).expanduser()
+    if not p.exists():
+        raise RuntimeError(f"{label} file not found: {p}")
+    content = p.read_text(encoding="utf-8").strip()
+    if not content:
+        raise RuntimeError(f"{label} file is empty: {p}")
+    return content
+
+
+def _load_workflow_docs() -> dict[str, str]:
+    return {
+        "planning": _read_required_text(PLAN_GUIDE_PATH, "Planning guide"),
+        "review": _read_required_text(REVIEW_GUIDE_PATH, "Review guide"),
+        "workflow": _read_required_text(WORKFLOW_GUIDE_PATH, "Workflow guide"),
+    }
+
+
+def _extract_mention_text(text: str) -> str:
+    return re.sub(r"<@[^>]+>", "", text).strip()
+
+
+def _thread_key(event: dict[str, Any]) -> str:
+    return event.get("thread_ts") or event.get("ts", "")
 
 
 def _extract_task_payload(text: str) -> str:
@@ -112,6 +144,7 @@ def _help_message() -> str:
         "Commands:",
         "- `repos` or `list repos`: show allowed repo aliases and branch patterns",
         "- `help`: show this message",
+        "- During planning clarifications: reply in-thread with `@bot <answers>` or `@bot cancel`",
         "",
         "Task format:",
         "- `repo=<alias> branch=<branch> <task text>`",
@@ -225,6 +258,120 @@ def _build_command(task: str) -> list[str]:
     return cmd
 
 
+def _answers_block(answers: list[str]) -> str:
+    if not answers:
+        return "(none)"
+    lines = []
+    for idx, answer in enumerate(answers, start=1):
+        lines.append(f"{idx}. {answer}")
+    return "\n".join(lines)
+
+
+def _build_planning_task(
+    user_task: str,
+    answers: list[str],
+    workflow_guide: str,
+    planning_guide: str,
+) -> str:
+    return f"""
+You are executing the planning phase only.
+
+Primary workflow requirements:
+{workflow_guide}
+
+Planning guidance:
+{planning_guide}
+
+Original user task:
+{user_task}
+
+Clarifications provided by user so far:
+{_answers_block(answers)}
+
+Hard requirements for this phase:
+1. Do not change source code or tests.
+2. Create exactly one JSON file named `{PLAN_OUTPUT_FILENAME}` in the current working directory.
+3. The JSON must match this schema:
+   {{
+     "status": "needs_input" | "ready",
+     "plan": "string",
+     "questions": ["string", ...],
+     "assumptions": ["string", ...]
+   }}
+4. If you need user input before implementation, set `"status": "needs_input"` and provide 1-3 concrete questions in `"questions"`.
+5. If planning is complete, set `"status": "ready"` and keep `"questions"` as an empty array.
+6. Validate JSON syntax (`python -m json.tool {PLAN_OUTPUT_FILENAME}`) before finishing.
+7. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+""".strip()
+
+
+def _build_execution_task(
+    user_task: str,
+    answers: list[str],
+    workflow_guide: str,
+    review_guide: str,
+    plan_text: str,
+) -> str:
+    return f"""
+Follow this required workflow exactly:
+{workflow_guide}
+
+Use this self-review guidance:
+{review_guide}
+
+Plan approved for execution:
+{plan_text}
+
+Original user task:
+{user_task}
+
+User clarifications:
+{_answers_block(answers)}
+
+Execution requirements:
+1. Implement the plan.
+2. Perform self-review against your own diff before finishing.
+3. Run relevant tests/verification commands.
+4. Create a PR if tooling/auth allows it; if blocked, clearly report the blocker and exact command/output.
+5. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+""".strip()
+
+
+def _load_plan_output(worktree_path: str) -> dict[str, Any]:
+    path = Path(worktree_path) / PLAN_OUTPUT_FILENAME
+    if not path.exists():
+        raise RuntimeError(f"Planning output file was not created: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Planning output is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("Planning output must be a JSON object.")
+
+    status = str(data.get("status", "")).strip().lower()
+    if status not in {"needs_input", "ready"}:
+        raise RuntimeError("Planning output status must be 'needs_input' or 'ready'.")
+
+    questions = data.get("questions", [])
+    if not isinstance(questions, list) or any(not isinstance(q, str) for q in questions):
+        raise RuntimeError("Planning output 'questions' must be an array of strings.")
+
+    plan = str(data.get("plan", "")).strip()
+    if not plan:
+        raise RuntimeError("Planning output must include non-empty 'plan'.")
+
+    assumptions = data.get("assumptions", [])
+    if not isinstance(assumptions, list) or any(not isinstance(a, str) for a in assumptions):
+        raise RuntimeError("Planning output 'assumptions' must be an array of strings.")
+
+    return {
+        "status": status,
+        "plan": plan,
+        "questions": [q.strip() for q in questions if q.strip()],
+        "assumptions": [a.strip() for a in assumptions if a.strip()],
+    }
+
+
 def _tail(text: str, max_chars: int) -> str:
     if not text:
         return ""
@@ -235,11 +382,212 @@ def _post_thread(channel: str, thread_ts: str, text: str) -> None:
     app.client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
 
 
+def _queue_pending_plan(
+    conversation_id: str,
+    channel: str,
+    thread_ts: str,
+    task: str,
+    repo_alias: str,
+    repo_path: str,
+    branch: str,
+    answers: list[str],
+    questions: list[str],
+) -> None:
+    with pending_plans_lock:
+        pending_plans[conversation_id] = {
+            "channel": channel,
+            "thread_ts": thread_ts,
+            "task": task,
+            "repo_alias": repo_alias,
+            "repo_path": repo_path,
+            "branch": branch,
+            "answers": list(answers),
+            "questions": list(questions),
+        }
+
+
+def _pop_pending_plan(conversation_id: str) -> dict[str, Any] | None:
+    with pending_plans_lock:
+        return pending_plans.pop(conversation_id, None)
+
+
+def _peek_pending_plan(conversation_id: str) -> dict[str, Any] | None:
+    with pending_plans_lock:
+        return pending_plans.get(conversation_id)
+
+
+def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
+    channel = job["channel"]
+    thread_ts = job["thread_ts"]
+    conversation_id = job["conversation_id"]
+    task = job["task"]
+    repo_alias = job["repo_alias"]
+    repo_path = job["repo_path"]
+    branch = job["branch"]
+    answers: list[str] = list(job.get("answers", []))
+    latest_reply = str(job.get("latest_reply", "")).strip()
+    if latest_reply:
+        answers.append(latest_reply)
+
+    workflow_docs = _load_workflow_docs()
+    wt_path = ""
+    keep_worktree = False
+    try:
+        wt_path, base_ref = _prepare_worktree(repo_path, branch)
+        _post_thread(
+            channel,
+            thread_ts,
+            (
+                f"Workflow started.\n"
+                f"repo=`{repo_alias}` branch=`{branch}` ref=`{base_ref}`\n"
+                f"worktree=`{wt_path}`\n"
+                "Stage: planning"
+            ),
+        )
+
+        planning_task = _build_planning_task(
+            user_task=task,
+            answers=answers,
+            workflow_guide=workflow_docs["workflow"],
+            planning_guide=workflow_docs["planning"],
+        )
+        planning_cmd = _build_command(planning_task)
+        planning_proc = subprocess.run(
+            planning_cmd,
+            cwd=wt_path,
+            capture_output=True,
+            text=True,
+            timeout=TASK_TIMEOUT_SECONDS,
+        )
+        if planning_proc.returncode != 0:
+            stdout = _tail(planning_proc.stdout, MAX_STDOUT_CHARS)
+            stderr = _tail(planning_proc.stderr, MAX_STDERR_CHARS)
+            message = f"Planning stage failed (exit {planning_proc.returncode})."
+            if stdout:
+                message += f"\n\nstdout:\n```{stdout}```"
+            if stderr:
+                message += f"\n\nstderr:\n```{stderr}```"
+            _post_thread(channel, thread_ts, message)
+            return False, False, wt_path
+
+        plan_output = _load_plan_output(wt_path)
+        if plan_output["status"] == "needs_input":
+            questions = plan_output["questions"]
+            if not questions:
+                raise RuntimeError("Planning requested input but returned no questions.")
+            question_lines = "\n".join(
+                f"{idx}. {question}" for idx, question in enumerate(questions, start=1)
+            )
+            _queue_pending_plan(
+                conversation_id=conversation_id,
+                channel=channel,
+                thread_ts=thread_ts,
+                task=task,
+                repo_alias=repo_alias,
+                repo_path=repo_path,
+                branch=branch,
+                answers=answers,
+                questions=questions,
+            )
+            _post_thread(
+                channel,
+                thread_ts,
+                (
+                    "Planning requires clarification before implementation.\n"
+                    "Reply in this thread by mentioning the bot and answering these questions:\n"
+                    f"{question_lines}"
+                ),
+            )
+            return False, True, wt_path
+
+        assumptions = plan_output["assumptions"]
+        assumptions_block = (
+            "\n".join(f"- {item}" for item in assumptions) if assumptions else "- (none)"
+        )
+        plan_text = f"{plan_output['plan']}\n\nAssumptions:\n{assumptions_block}"
+
+        _post_thread(channel, thread_ts, "Stage: implement + self-review + test + PR")
+        execute_task = _build_execution_task(
+            user_task=task,
+            answers=answers,
+            workflow_guide=workflow_docs["workflow"],
+            review_guide=workflow_docs["review"],
+            plan_text=plan_text,
+        )
+        execute_cmd = _build_command(execute_task)
+        proc = subprocess.run(
+            execute_cmd,
+            cwd=wt_path,
+            capture_output=True,
+            text=True,
+            timeout=TASK_TIMEOUT_SECONDS,
+        )
+        stdout = _tail(proc.stdout, MAX_STDOUT_CHARS)
+        stderr = _tail(proc.stderr, MAX_STDERR_CHARS)
+        status = "completed" if proc.returncode == 0 else f"failed (exit {proc.returncode})"
+        message = f"Workflow run {status}."
+        if stdout:
+            message += f"\n\nstdout:\n```{stdout}```"
+        if stderr:
+            message += f"\n\nstderr:\n```{stderr}```"
+        if not stdout and not stderr:
+            message += "\n\n(no output)"
+        _post_thread(channel, thread_ts, message)
+        if proc.returncode != 0 and KEEP_WORKTREE_ON_FAILURE:
+            keep_worktree = True
+            _post_thread(
+                channel,
+                thread_ts,
+                f"Keeping failed worktree for inspection: `{wt_path}`",
+            )
+        return keep_worktree, False, wt_path
+    except subprocess.TimeoutExpired:
+        _post_thread(channel, thread_ts, f"Timed out after {TASK_TIMEOUT_SECONDS} seconds.")
+        return False, False, wt_path
+    except Exception as exc:
+        _post_thread(channel, thread_ts, f"Runner error: `{exc}`")
+        return False, False, wt_path
+
+
 @app.event("app_mention")
 def on_app_mention(event: dict[str, Any], say) -> None:
     channel = event.get("channel", "")
     if ALLOW_CHANNEL_IDS and channel not in ALLOW_CHANNEL_IDS:
         say(thread_ts=event.get("ts"), text="This channel is not in the allow-list.")
+        return
+
+    conversation_id = _thread_key(event)
+    mention_text = _extract_mention_text(event.get("text", ""))
+    pending = _peek_pending_plan(conversation_id) if conversation_id else None
+    if pending is not None:
+        normalized = " ".join(mention_text.lower().split())
+        if normalized in {"cancel", "abort"}:
+            _pop_pending_plan(conversation_id)
+            say(thread_ts=pending["thread_ts"], text="Pending planning conversation canceled.")
+            return
+        if not mention_text:
+            say(
+                thread_ts=pending["thread_ts"],
+                text="No clarification text found. Reply with your answers in this thread.",
+            )
+            return
+        resumed = _pop_pending_plan(conversation_id)
+        if resumed is None:
+            say(
+                thread_ts=event.get("thread_ts") or event.get("ts"),
+                text="No pending planning conversation found for this thread.",
+            )
+            return
+        resumed_job = {
+            **resumed,
+            "conversation_id": conversation_id,
+            "latest_reply": mention_text,
+        }
+        task_queue.put(resumed_job)
+        say(
+            thread_ts=resumed["thread_ts"],
+            text="Clarifications received. Resuming planning and execution.",
+        )
         return
 
     payload = _extract_task_payload(event.get("text", ""))
@@ -275,11 +623,14 @@ def on_app_mention(event: dict[str, Any], say) -> None:
 
     job = {
         "channel": channel,
-        "thread_ts": event.get("ts", ""),
+        "thread_ts": conversation_id,
+        "conversation_id": conversation_id,
         "task": parsed["task"],
         "repo_alias": target["repo_alias"],
         "repo_path": target["repo_path"],
         "branch": target["branch"],
+        "answers": [],
+        "latest_reply": "",
     }
     task_queue.put(job)
     say(
@@ -294,57 +645,12 @@ def on_app_mention(event: dict[str, Any], say) -> None:
 def worker() -> None:
     while True:
         job = task_queue.get()
-        channel = job["channel"]
-        thread_ts = job["thread_ts"]
-        task = job["task"]
-        repo_alias = job["repo_alias"]
-        repo_path = job["repo_path"]
-        branch = job["branch"]
-        cmd = _build_command(task)
-        wt_path = ""
         keep_worktree = False
+        wt_path = ""
         try:
-            wt_path, base_ref = _prepare_worktree(repo_path, branch)
-            _post_thread(
-                channel,
-                thread_ts,
-                (
-                    f"Running: `{shlex.join(cmd)}`\n"
-                    f"repo=`{repo_alias}` branch=`{branch}` ref=`{base_ref}`\n"
-                    f"worktree=`{wt_path}`"
-                ),
-            )
-            proc = subprocess.run(
-                cmd,
-                cwd=wt_path,
-                capture_output=True,
-                text=True,
-                timeout=TASK_TIMEOUT_SECONDS,
-            )
-            stdout = _tail(proc.stdout, MAX_STDOUT_CHARS)
-            stderr = _tail(proc.stderr, MAX_STDERR_CHARS)
-
-            status = "completed" if proc.returncode == 0 else f"failed (exit {proc.returncode})"
-            message = f"Run {status}."
-            if stdout:
-                message += f"\n\nstdout:\n```{stdout}```"
-            if stderr:
-                message += f"\n\nstderr:\n```{stderr}```"
-            if not stdout and not stderr:
-                message += "\n\n(no output)"
-            _post_thread(channel, thread_ts, message)
-            if proc.returncode != 0 and KEEP_WORKTREE_ON_FAILURE:
-                keep_worktree = True
-                _post_thread(
-                    channel,
-                    thread_ts,
-                    f"Keeping failed worktree for inspection: `{wt_path}`",
-                )
-        except subprocess.TimeoutExpired:
-            _post_thread(channel, thread_ts, f"Timed out after {TASK_TIMEOUT_SECONDS} seconds.")
-        except Exception as exc:
-            _post_thread(channel, thread_ts, f"Runner error: `{exc}`")
+            keep_worktree, _, wt_path = _run_workflow(job)
         finally:
+            repo_path = job["repo_path"]
             if wt_path and not keep_worktree:
                 _cleanup_worktree(repo_path, wt_path)
             task_queue.task_done()

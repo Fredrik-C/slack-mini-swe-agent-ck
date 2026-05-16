@@ -8,8 +8,10 @@ It does not require inbound webhooks or a public server URL.
 
 - Receives `app_mention` events in Slack.
 - Parses `repo=<alias>` and optional `branch=<name>` from the mention text.
-- Queues tasks and runs them sequentially with `mini -t "<task>"` (and `-y` by default).
+- Runs a workflow per task: plan => implement => self-review => test => create PR.
+- Uses `mini -t "<task>"` to execute planning and implementation stages.
 - Creates a dedicated git worktree per task, runs in that worktree, then removes it.
+- If planning needs clarification, asks questions in the same Slack thread and resumes after user reply.
 - Posts completion status and output back to the same Slack thread.
 
 ## Container-First Deployment (Recommended)
@@ -124,6 +126,20 @@ Use container-visible repo paths (`/repos/...`):
 }
 ```
 
+Edit workflow guides (optional, recommended):
+
+```bash
+nano prompts/workflow.md
+nano prompts/planning.md
+nano prompts/review.md
+```
+
+These files control:
+
+- overall phase order and delivery expectations (`workflow.md`)
+- planning quality and clarification behavior (`planning.md`)
+- self-review checklist before finalizing (`review.md`)
+
 ## 4) Run with Docker Compose
 
 ```bash
@@ -159,6 +175,10 @@ docker compose down
 Mention the bot in Slack:
 
 `@your-bot swe: repo=platform branch=develop run pytest and fix failing tests`
+
+If planning needs clarification, the bot asks follow-up questions in the same thread.
+Reply in that thread and mention the bot with your answers to resume execution.
+Use `@your-bot cancel` in that thread to abort a pending clarification flow.
 
 `branch=` is optional; if omitted, `default_branch` from `repos.json` is used.
 
@@ -223,6 +243,10 @@ Environment variables in `.env`:
 - `WORKTREE_ROOT` (default: `.worktrees`): parent folder for temporary task worktrees.
 - `GIT_FETCH_BEFORE_WORKTREE` (default: `true`): run `git fetch --all --prune` before creating worktree (task fails if fetch fails).
 - `KEEP_WORKTREE_ON_FAILURE` (default: `false`): keep failed worktree for debugging.
+- `WORKFLOW_GUIDE_PATH` (default: `prompts/workflow.md`): markdown that defines required phase order and workflow expectations.
+- `PLAN_GUIDE_PATH` (default: `prompts/planning.md`): markdown that controls planning behavior and question quality.
+- `REVIEW_GUIDE_PATH` (default: `prompts/review.md`): markdown used for self-review quality bar.
+- `PLAN_OUTPUT_FILENAME` (default: `.mini_workflow_plan.json`): planning-stage JSON handshake file written inside each task worktree.
 - `PUID` / `PGID` (Docker build args): container runtime user identity (non-root).
 
 ## ChatGPT Responses Setup
@@ -251,6 +275,7 @@ Notes:
 - Only repos declared in `repos.json` are allowed.
 - Branch is checked against `allowed_branches` patterns in the selected repo config.
 - Each task gets an isolated worktree path and does not reuse previous task filesystem state.
+- During planning, the bot may pause and ask clarifying questions; reply in-thread with `@your-bot <answers>`.
 - Use `repos`/`list repos` to see current aliases and allowed branch patterns from config.
 
 ## Notes
