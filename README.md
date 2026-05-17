@@ -8,11 +8,12 @@ It does not require inbound webhooks or a public server URL.
 
 - Receives `app_mention` events in Slack.
 - Parses `repo=<alias>` and optional `branch=<name>` from the mention text.
-- Runs a workflow per task: plan => implement => self-review => test => create PR.
-- Uses `mini -t "<task>"` to execute planning and implementation stages.
+- Runs a workflow per task: plan => implement => review (iterate implement/review up to 3 total review passes) => test => create PR.
+- Uses separate `mini -t "<task>"` runs for plan, implement, review, and test/PR stages.
 - Creates a dedicated git worktree per task, runs in that worktree, then removes it.
 - If planning needs clarification, asks questions in the same Slack thread and resumes after user reply.
 - Posts completion status and output back to the same Slack thread.
+- Exposes a lightweight web UI for session/task status.
 
 ## Container-First Deployment (Recommended)
 
@@ -55,7 +56,6 @@ export PGID="$(id -g)"
 ```bash
 sudo mkdir -p /srv/agent/repos
 sudo mkdir -p /srv/agent/worktrees
-sudo mkdir -p /srv/agent/chatgpt-auth
 sudo chown -R "$PUID":"$PGID" /srv/agent
 ```
 
@@ -96,8 +96,15 @@ Set at least:
 - `SLACK_APP_TOKEN=xapp-...`
 - `PUID=<your host uid>`
 - `PGID=<your host gid>`
-- `MINI_MODEL_CLASS=litellm_response`
-- `MINI_MODEL_NAME=chatgpt/gpt-5.3-codex`
+- `MINI_MODEL_CLASS=openrouter`
+- `MINI_MODEL_NAME=openai/gpt-4.1-mini`
+- `OPENROUTER_API_KEY=sk-or-v1-...`
+
+Optional per-phase overrides:
+
+- `MINI_PLAN_MODEL_NAME=<model-for-planning>`
+- `MINI_IMPLEMENT_MODEL_NAME=<model-for-implementation>`
+- `MINI_REVIEW_MODEL_NAME=<model-for-review>`
 
 Create repo allow-list:
 
@@ -138,7 +145,7 @@ These files control:
 
 - overall phase order and delivery expectations (`workflow.md`)
 - planning quality and clarification behavior (`planning.md`)
-- self-review checklist before finalizing (`review.md`)
+- review checklist before finalizing (`review.md`)
 
 ## 4) Run with Docker Compose
 
@@ -148,6 +155,11 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
+Web UI:
+
+- `http://<host>:8787/`
+- JSON API: `http://<host>:8787/sessions.json`
+
 Verify non-root runtime:
 
 ```bash
@@ -156,13 +168,11 @@ docker compose exec mini-swe-slack id
 
 Expected: uid/gid should match `PUID`/`PGID` and must not be `0`.
 
-First-time ChatGPT OAuth login (one-time):
+OpenRouter connectivity check:
 
 1. Keep `docker compose logs -f` open.
 2. Trigger any real task from Slack (not `repos`/`help`).
-3. In logs, LiteLLM will print a device login prompt with URL/code.
-4. Complete that login in browser.
-5. OAuth tokens are persisted in `/srv/agent/chatgpt-auth` and reused across restarts.
+3. If API auth is invalid, task output will include the OpenRouter error (invalid key/model/access).
 
 Stop:
 
@@ -232,8 +242,12 @@ Environment variables in `.env`:
 - `SLACK_BOT_TOKEN` (required): Slack bot token (`xoxb-...`).
 - `SLACK_APP_TOKEN` (required): Slack app-level token (`xapp-...`).
 - `MINI_CMD` (default: `mini`): command used to run mini-swe-agent.
-- `MINI_MODEL_CLASS` (optional): model class flag passed to `mini` as `--model-class` (set `litellm_response` for ChatGPT responses route).
-- `MINI_MODEL_NAME` (optional): model name passed to `mini` as `-m` (for example `chatgpt/gpt-5.3-codex`).
+- `MINI_MODEL_CLASS` (recommended: `openrouter`): model class flag passed to `mini` as `--model-class`.
+- `MINI_MODEL_NAME` (recommended): model name passed to `mini` as `-m` (for example `openai/gpt-4.1-mini`).
+- `OPENROUTER_API_KEY` (required for `MINI_MODEL_CLASS=openrouter`): API key used by OpenRouter model execution.
+- `MINI_PLAN_MODEL_CLASS` / `MINI_PLAN_MODEL_NAME` (optional): overrides used only for planning stage.
+- `MINI_IMPLEMENT_MODEL_CLASS` / `MINI_IMPLEMENT_MODEL_NAME` (optional): overrides used for implementation and test/PR stage.
+- `MINI_REVIEW_MODEL_CLASS` / `MINI_REVIEW_MODEL_NAME` (optional): overrides used only for review stage.
 - `MINI_USE_YOLO` (default: `true`): append `-y` for automatic execution.
 - `MINI_EXIT_IMMEDIATELY` (default: `true`): append `--exit-immediately` so non-TTY runs do not block at REPL finish prompt.
 - `MSWEA_CONFIGURED` (recommended: `true`): disables mini's interactive first-time setup prompt for non-TTY Slack runs.
@@ -250,18 +264,25 @@ Environment variables in `.env`:
 - `KEEP_WORKTREE_ON_FAILURE` (default: `false`): keep failed worktree for debugging.
 - `WORKFLOW_GUIDE_PATH` (default: `prompts/workflow.md`): markdown that defines required phase order and workflow expectations.
 - `PLAN_GUIDE_PATH` (default: `prompts/planning.md`): markdown that controls planning behavior and question quality.
-- `REVIEW_GUIDE_PATH` (default: `prompts/review.md`): markdown used for self-review quality bar.
+- `REVIEW_GUIDE_PATH` (default: `prompts/review.md`): markdown used for review quality bar.
 - `PLAN_OUTPUT_FILENAME` (default: `.mini_workflow_plan.json`): planning-stage JSON handshake file written inside each task worktree.
+- `REVIEW_OUTPUT_FILENAME` (default: `.mini_workflow_review.json`): review-stage JSON handshake file written inside each task worktree.
+- `MAX_IMPLEMENT_REVIEW_LOOPS` (default: `3`): max implement/review loop count before moving to test/PR.
+- `WEB_UI_ENABLED` (default: `true`): enable local web status UI.
+- `WEB_UI_BIND` (default: `0.0.0.0`): bind address for UI HTTP server.
+- `WEB_UI_PORT` (default: `8787`): UI HTTP server port.
+- `WEB_UI_MAX_SESSIONS` (default: `200`): max in-memory session records retained.
 - `PUID` / `PGID` (Docker build args): container runtime user identity (non-root).
 
-## ChatGPT Responses Setup
+## OpenRouter Setup
 
-For the ChatGPT subscription auth route discussed earlier, use:
+Use OpenRouter directly with:
 
-- `MINI_MODEL_CLASS=litellm_response`
-- `MINI_MODEL_NAME=chatgpt/gpt-5.3-codex` (or another `chatgpt/...` model supported by your LiteLLM version)
+- `MINI_MODEL_CLASS=openrouter`
+- `MINI_MODEL_NAME=<provider/model>` (example: `openai/gpt-4.1-mini`)
+- `OPENROUTER_API_KEY=sk-or-v1-...`
 
-This avoids `/chat/completions` bridge issues by using Responses-mode model handling.
+This relay does not require ChatGPT OAuth/device-login when using this route.
 
 ## Slack Task Format
 

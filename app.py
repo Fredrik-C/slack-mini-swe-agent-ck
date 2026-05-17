@@ -8,6 +8,8 @@ import time
 import uuid
 import json
 import fnmatch
+import html
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +40,13 @@ MINI_USE_YOLO = _bool_env("MINI_USE_YOLO", True)
 MINI_EXIT_IMMEDIATELY = _bool_env("MINI_EXIT_IMMEDIATELY", True)
 MINI_MODEL_CLASS = os.getenv("MINI_MODEL_CLASS", "").strip()
 MINI_MODEL_NAME = os.getenv("MINI_MODEL_NAME", "").strip()
+MINI_PLAN_MODEL_CLASS = os.getenv("MINI_PLAN_MODEL_CLASS", "").strip()
+MINI_PLAN_MODEL_NAME = os.getenv("MINI_PLAN_MODEL_NAME", "").strip()
+MINI_IMPLEMENT_MODEL_CLASS = os.getenv("MINI_IMPLEMENT_MODEL_CLASS", "").strip()
+MINI_IMPLEMENT_MODEL_NAME = os.getenv("MINI_IMPLEMENT_MODEL_NAME", "").strip()
+MINI_REVIEW_MODEL_CLASS = os.getenv("MINI_REVIEW_MODEL_CLASS", "").strip()
+MINI_REVIEW_MODEL_NAME = os.getenv("MINI_REVIEW_MODEL_NAME", "").strip()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 TASK_TIMEOUT_SECONDS = int(os.getenv("TASK_TIMEOUT_SECONDS", "7200"))
 MAX_STDOUT_CHARS = int(os.getenv("MAX_STDOUT_CHARS", "3500"))
 MAX_STDERR_CHARS = int(os.getenv("MAX_STDERR_CHARS", "1500"))
@@ -54,9 +63,27 @@ PLAN_GUIDE_PATH = os.getenv("PLAN_GUIDE_PATH", "prompts/planning.md")
 REVIEW_GUIDE_PATH = os.getenv("REVIEW_GUIDE_PATH", "prompts/review.md")
 WORKFLOW_GUIDE_PATH = os.getenv("WORKFLOW_GUIDE_PATH", "prompts/workflow.md")
 PLAN_OUTPUT_FILENAME = os.getenv("PLAN_OUTPUT_FILENAME", ".mini_workflow_plan.json")
+REVIEW_OUTPUT_FILENAME = os.getenv("REVIEW_OUTPUT_FILENAME", ".mini_workflow_review.json")
+MAX_IMPLEMENT_REVIEW_LOOPS = int(os.getenv("MAX_IMPLEMENT_REVIEW_LOOPS", "3"))
+WEB_UI_ENABLED = _bool_env("WEB_UI_ENABLED", True)
+WEB_UI_BIND = os.getenv("WEB_UI_BIND", "0.0.0.0").strip() or "0.0.0.0"
+WEB_UI_PORT = int(os.getenv("WEB_UI_PORT", "8787"))
+WEB_UI_MAX_SESSIONS = int(os.getenv("WEB_UI_MAX_SESSIONS", "200"))
 ALLOW_CHANNEL_IDS = {
     c.strip() for c in os.getenv("ALLOW_CHANNEL_IDS", "").split(",") if c.strip()
 }
+
+model_classes_to_check = [
+    MINI_MODEL_CLASS,
+    MINI_PLAN_MODEL_CLASS,
+    MINI_IMPLEMENT_MODEL_CLASS,
+    MINI_REVIEW_MODEL_CLASS,
+]
+if any(model_class.lower() == "openrouter" for model_class in model_classes_to_check if model_class):
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is required when any model class is set to openrouter."
+        )
 
 app = App(token=SLACK_BOT_TOKEN)
 task_queue: "queue.Queue[dict[str, Any]]" = queue.Queue()
@@ -77,6 +104,8 @@ runtime_state: dict[str, Any] = {
     "last_stdout": "",
     "last_stderr": "",
 }
+sessions_lock = threading.Lock()
+sessions: dict[str, dict[str, Any]] = {}
 
 
 def _run_quiet(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -191,6 +220,73 @@ def _snapshot_runtime_state() -> dict[str, Any]:
         return dict(runtime_state)
 
 
+def _now_unix() -> float:
+    return time.time()
+
+
+def _fmt_timestamp(ts: float) -> str:
+    if not ts:
+        return ""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+def _init_session(job: dict[str, Any]) -> None:
+    session_id = str(job.get("session_id", "")).strip()
+    if not session_id:
+        return
+    now = _now_unix()
+    with sessions_lock:
+        sessions[session_id] = {
+            "session_id": session_id,
+            "conversation_id": str(job.get("conversation_id", "")),
+            "thread_ts": str(job.get("thread_ts", "")),
+            "channel": str(job.get("channel", "")),
+            "repo_alias": str(job.get("repo_alias", "")),
+            "branch": str(job.get("branch", "")),
+            "task": str(job.get("task", "")),
+            "state": "queued",
+            "stage": "queued",
+            "status": "queued",
+            "review_pass": 0,
+            "max_review_passes": MAX_IMPLEMENT_REVIEW_LOOPS,
+            "created_at": now,
+            "updated_at": now,
+            "worktree": "",
+            "last_error": "",
+            "last_stdout": "",
+            "last_stderr": "",
+        }
+        if len(sessions) > WEB_UI_MAX_SESSIONS:
+            # Best effort trim of oldest completed records.
+            completed = [
+                (sid, record.get("updated_at", 0.0))
+                for sid, record in sessions.items()
+                if str(record.get("state", "")) in {"completed", "failed", "timeout", "canceled"}
+            ]
+            completed.sort(key=lambda item: item[1])
+            for sid, _ in completed:
+                if len(sessions) <= WEB_UI_MAX_SESSIONS:
+                    break
+                sessions.pop(sid, None)
+
+
+def _update_session(session_id: str, **kwargs: Any) -> None:
+    if not session_id:
+        return
+    with sessions_lock:
+        if session_id not in sessions:
+            return
+        sessions[session_id].update(kwargs)
+        sessions[session_id]["updated_at"] = _now_unix()
+
+
+def _snapshot_sessions() -> list[dict[str, Any]]:
+    with sessions_lock:
+        rows = [dict(record) for record in sessions.values()]
+    rows.sort(key=lambda row: float(row.get("created_at", 0.0) or 0.0), reverse=True)
+    return rows
+
+
 def _status_message() -> str:
     state = _snapshot_runtime_state()
     queued = task_queue.qsize()
@@ -224,6 +320,198 @@ def _status_message() -> str:
     if last_stderr:
         lines.append(f"last_stderr_tail:\n```{last_stderr}```")
     return "\n".join(lines)
+
+
+def _sessions_payload() -> dict[str, Any]:
+    return {
+        "runtime": _snapshot_runtime_state(),
+        "queue_depth": task_queue.qsize(),
+        "pending_clarifications": len(pending_plans),
+        "sessions": _snapshot_sessions(),
+        "generated_at": _now_unix(),
+    }
+
+
+def _render_sessions_html() -> str:
+    payload = _sessions_payload()
+    runtime = payload["runtime"]
+    rows = payload["sessions"]
+    generated = _fmt_timestamp(float(payload["generated_at"]))
+    runtime_stage = html.escape(str(runtime.get("stage", "")))
+    runtime_status = html.escape(str(runtime.get("last_status", "")))
+    queue_depth = int(payload["queue_depth"])
+    pending = int(payload["pending_clarifications"])
+
+    table_rows: list[str] = []
+    for row in rows:
+        created = _fmt_timestamp(float(row.get("created_at", 0.0) or 0.0))
+        updated = _fmt_timestamp(float(row.get("updated_at", 0.0) or 0.0))
+        state = html.escape(str(row.get("state", "")))
+        stage = html.escape(str(row.get("stage", "")))
+        status = html.escape(str(row.get("status", "")))
+        session_id = html.escape(str(row.get("session_id", "")))
+        repo_alias = html.escape(str(row.get("repo_alias", "")))
+        branch = html.escape(str(row.get("branch", "")))
+        review_pass = int(row.get("review_pass", 0) or 0)
+        max_review_passes = int(row.get("max_review_passes", 0) or 0)
+        task_text = html.escape(str(row.get("task", "")))
+        task_short = task_text if len(task_text) <= 220 else f"{task_text[:220]}..."
+        error_text = html.escape(str(row.get("last_error", "")))
+        table_rows.append(
+            (
+                "<tr>"
+                f"<td>{session_id}</td>"
+                f"<td>{state}</td>"
+                f"<td>{stage}</td>"
+                f"<td>{status}</td>"
+                f"<td>{review_pass}/{max_review_passes}</td>"
+                f"<td>{repo_alias}</td>"
+                f"<td>{branch}</td>"
+                f"<td title=\"{task_text}\">{task_short}</td>"
+                f"<td>{created}</td>"
+                f"<td>{updated}</td>"
+                f"<td>{error_text}</td>"
+                "</tr>"
+            )
+        )
+
+    rows_html = "\n".join(table_rows) if table_rows else "<tr><td colspan='11'>No sessions yet.</td></tr>"
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="refresh" content="5" />
+  <title>mini-swe-agent sessions</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f3f5f7;
+      --card: #ffffff;
+      --text: #16212b;
+      --muted: #5f6b7a;
+      --line: #d8dee6;
+      --accent: #145ea8;
+    }}
+    body {{
+      margin: 0;
+      padding: 18px;
+      font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }}
+    .summary {{
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 14px;
+    }}
+    .meta {{
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 6px;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }}
+    th, td {{
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      padding: 8px;
+      font-size: 13px;
+    }}
+    th {{
+      background: #eef2f6;
+      color: #27394f;
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+    }}
+    tr:last-child td {{
+      border-bottom: 0;
+    }}
+    .title {{
+      margin: 0 0 10px 0;
+      color: var(--accent);
+    }}
+    a {{
+      color: var(--accent);
+      text-decoration: none;
+    }}
+  </style>
+</head>
+<body>
+  <h2 class="title">mini-swe-agent Sessions</h2>
+  <div class="summary">
+    <div>runtime_stage=<strong>{runtime_stage}</strong> runtime_status=<strong>{runtime_status}</strong></div>
+    <div>queue_depth=<strong>{queue_depth}</strong> pending_clarifications=<strong>{pending}</strong> sessions=<strong>{len(rows)}</strong></div>
+    <div class="meta">updated {generated} | <a href="/sessions.json">sessions.json</a></div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Session</th>
+        <th>State</th>
+        <th>Stage</th>
+        <th>Status</th>
+        <th>Review</th>
+        <th>Repo</th>
+        <th>Branch</th>
+        <th>Task</th>
+        <th>Created</th>
+        <th>Updated</th>
+        <th>Error</th>
+      </tr>
+    </thead>
+    <tbody>
+      {rows_html}
+    </tbody>
+  </table>
+</body>
+</html>"""
+
+
+class _WebStatusHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path == "/sessions.json":
+            payload = _sessions_payload()
+            body = json.dumps(payload, ensure_ascii=True, indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/" or path == "/index.html":
+            body = _render_sessions_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Not found")
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        return
+
+
+def _start_web_ui() -> None:
+    if not WEB_UI_ENABLED:
+        return
+    server = ThreadingHTTPServer((WEB_UI_BIND, WEB_UI_PORT), _WebStatusHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"Web UI running on http://{WEB_UI_BIND}:{WEB_UI_PORT}")
 
 
 def _parse_payload(payload: str) -> dict[str, str]:
@@ -322,12 +610,30 @@ def _cleanup_worktree(repo_path: str, wt_path: str) -> None:
     _run_quiet(["git", "-C", repo_path, "worktree", "remove", "--force", wt_path])
 
 
-def _build_command(task: str) -> list[str]:
+def _resolve_phase_model(phase: str) -> tuple[str, str]:
+    phase_key = phase.strip().lower()
+    if phase_key == "plan":
+        model_class = MINI_PLAN_MODEL_CLASS or MINI_MODEL_CLASS
+        model_name = MINI_PLAN_MODEL_NAME or MINI_MODEL_NAME
+        return model_class, model_name
+    if phase_key == "implement":
+        model_class = MINI_IMPLEMENT_MODEL_CLASS or MINI_MODEL_CLASS
+        model_name = MINI_IMPLEMENT_MODEL_NAME or MINI_MODEL_NAME
+        return model_class, model_name
+    if phase_key == "review":
+        model_class = MINI_REVIEW_MODEL_CLASS or MINI_MODEL_CLASS
+        model_name = MINI_REVIEW_MODEL_NAME or MINI_MODEL_NAME
+        return model_class, model_name
+    return MINI_MODEL_CLASS, MINI_MODEL_NAME
+
+
+def _build_command(task: str, phase: str) -> list[str]:
     cmd = shlex.split(MINI_CMD)
-    if MINI_MODEL_CLASS:
-        cmd.extend(["--model-class", MINI_MODEL_CLASS])
-    if MINI_MODEL_NAME:
-        cmd.extend(["-m", MINI_MODEL_NAME])
+    model_class, model_name = _resolve_phase_model(phase)
+    if model_class:
+        cmd.extend(["--model-class", model_class])
+    if model_name:
+        cmd.extend(["-m", model_name])
     if MINI_USE_YOLO:
         cmd.append("-y")
     if MINI_EXIT_IMMEDIATELY:
@@ -435,7 +741,41 @@ Hard requirements for this phase:
 """.strip()
 
 
-def _build_execution_task(
+def _build_implementation_task(
+    user_task: str,
+    answers: list[str],
+    workflow_guide: str,
+    plan_text: str,
+    review_feedback: list[str],
+) -> str:
+    feedback_block = "\n".join(f"- {item}" for item in review_feedback) if review_feedback else "- (none)"
+    return f"""
+Follow this required workflow exactly:
+{workflow_guide}
+
+You are in the implementation phase only.
+
+Plan approved for execution:
+{plan_text}
+
+Original user task:
+{user_task}
+
+User clarifications:
+{_answers_block(answers)}
+
+Findings from the latest review pass to address:
+{feedback_block}
+
+Implementation requirements:
+1. Modify code to satisfy the plan and review feedback.
+2. Do not run full test suite yet.
+3. Do not create a pull request yet.
+4. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+""".strip()
+
+
+def _build_review_task(
     user_task: str,
     answers: list[str],
     workflow_guide: str,
@@ -446,7 +786,48 @@ def _build_execution_task(
 Follow this required workflow exactly:
 {workflow_guide}
 
-Use this self-review guidance:
+Use this review guidance:
+{review_guide}
+
+You are in the review phase only.
+
+Plan approved for execution:
+{plan_text}
+
+Original user task:
+{user_task}
+
+User clarifications:
+{_answers_block(answers)}
+
+Hard requirements for this phase:
+1. Do not change source code or tests.
+2. Review the git diff in the current worktree and determine if implementation changes are needed.
+3. Create exactly one JSON file named `{REVIEW_OUTPUT_FILENAME}` in the current working directory.
+4. The JSON must match this schema:
+   {{
+     "status": "needs_changes" | "approved",
+     "issues": ["string", ...]
+   }}
+5. If changes are needed, set `"status": "needs_changes"` and provide concrete issues to fix.
+6. If implementation is acceptable, set `"status": "approved"` and keep `"issues"` as an empty array.
+7. Validate JSON syntax (`python -m json.tool {REVIEW_OUTPUT_FILENAME}`) before finishing.
+8. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+""".strip()
+
+
+def _build_test_pr_task(
+    user_task: str,
+    answers: list[str],
+    workflow_guide: str,
+    review_guide: str,
+    plan_text: str,
+) -> str:
+    return f"""
+Follow this required workflow exactly:
+{workflow_guide}
+
+Use this review guidance:
 {review_guide}
 
 Plan approved for execution:
@@ -458,11 +839,10 @@ Original user task:
 User clarifications:
 {_answers_block(answers)}
 
-Execution requirements:
-1. Implement the plan.
-2. Perform self-review against your own diff before finishing.
-3. Run relevant tests/verification commands.
-4. Create a PR if tooling/auth allows it; if blocked, clearly report the blocker and exact command/output.
+Execution requirements for this phase:
+1. Do not make broad feature changes unless required to fix failing tests or review-identified defects.
+2. Run relevant tests/verification commands.
+3. Create a PR if tooling/auth allows it; if blocked, clearly report the blocker and exact command/output.
 5. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
 """.strip()
 
@@ -502,6 +882,32 @@ def _load_plan_output(worktree_path: str) -> dict[str, Any]:
     }
 
 
+def _load_review_output(worktree_path: str) -> dict[str, Any]:
+    path = Path(worktree_path) / REVIEW_OUTPUT_FILENAME
+    if not path.exists():
+        raise RuntimeError(f"Review output file was not created: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Review output is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("Review output must be a JSON object.")
+
+    status = str(data.get("status", "")).strip().lower()
+    if status not in {"needs_changes", "approved"}:
+        raise RuntimeError("Review output status must be 'needs_changes' or 'approved'.")
+
+    issues = data.get("issues", [])
+    if not isinstance(issues, list) or any(not isinstance(item, str) for item in issues):
+        raise RuntimeError("Review output 'issues' must be an array of strings.")
+
+    normalized_issues = [item.strip() for item in issues if item.strip()]
+    if status == "needs_changes" and not normalized_issues:
+        raise RuntimeError("Review marked needs_changes but did not provide issues.")
+
+    return {"status": status, "issues": normalized_issues}
+
+
 def _tail(text: str, max_chars: int) -> str:
     if not text:
         return ""
@@ -514,6 +920,7 @@ def _post_thread(channel: str, thread_ts: str, text: str) -> None:
 
 def _queue_pending_plan(
     conversation_id: str,
+    session_id: str,
     channel: str,
     thread_ts: str,
     task: str,
@@ -525,6 +932,7 @@ def _queue_pending_plan(
 ) -> None:
     with pending_plans_lock:
         pending_plans[conversation_id] = {
+            "session_id": session_id,
             "channel": channel,
             "thread_ts": thread_ts,
             "task": task,
@@ -550,6 +958,7 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
     channel = job["channel"]
     thread_ts = job["thread_ts"]
     conversation_id = job["conversation_id"]
+    session_id = str(job.get("session_id", "")).strip()
     task = job["task"]
     repo_alias = job["repo_alias"]
     repo_path = job["repo_path"]
@@ -562,6 +971,8 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
     workflow_docs = _load_workflow_docs()
     wt_path = ""
     keep_worktree = False
+    review_feedback: list[str] = []
+    review_pass = 0
     try:
         _set_runtime_state(
             running=True,
@@ -576,13 +987,25 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
             last_stdout="",
             last_stderr="",
         )
+        _update_session(
+            session_id,
+            state="running",
+            stage="preparing-worktree",
+            status="running",
+            review_pass=review_pass,
+            last_error="",
+            last_stdout="",
+            last_stderr="",
+        )
         wt_path, base_ref = _prepare_worktree(repo_path, branch)
         _set_runtime_state(worktree=wt_path)
+        _update_session(session_id, worktree=wt_path)
         _post_thread(
             channel,
             thread_ts,
             (
                 f"Workflow started.\n"
+                f"session=`{session_id}`\n"
                 f"repo=`{repo_alias}` branch=`{branch}` ref=`{base_ref}`\n"
                 f"worktree=`{wt_path}`\n"
                 "Stage: planning"
@@ -595,10 +1018,16 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
             workflow_guide=workflow_docs["workflow"],
             planning_guide=workflow_docs["planning"],
         )
-        planning_cmd = _build_command(planning_task)
+        planning_cmd = _build_command(planning_task, phase="plan")
         _set_runtime_state(
             stage="planning",
             stage_since=time.time(),
+            command=shlex.join(planning_cmd),
+        )
+        _update_session(
+            session_id,
+            stage="planning",
+            status="running",
             command=shlex.join(planning_cmd),
         )
         _post_thread(
@@ -627,6 +1056,15 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
                 last_stdout=stdout,
                 last_stderr=stderr,
             )
+            _update_session(
+                session_id,
+                state="failed",
+                stage="planning-failed",
+                status=f"failed (planning exit {planning_proc.returncode})",
+                last_error=f"Planning stage failed (exit {planning_proc.returncode}).",
+                last_stdout=stdout,
+                last_stderr=stderr,
+            )
             message = f"Planning stage failed (exit {planning_proc.returncode})."
             if stdout:
                 message += f"\n\nstdout:\n```{stdout}```"
@@ -645,6 +1083,7 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
             )
             _queue_pending_plan(
                 conversation_id=conversation_id,
+                session_id=session_id,
                 channel=channel,
                 thread_ts=thread_ts,
                 task=task,
@@ -672,6 +1111,14 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
                 last_stdout=_tail(planning_proc.stdout, MAX_STDOUT_CHARS),
                 last_stderr=_tail(planning_proc.stderr, MAX_STDERR_CHARS),
             )
+            _update_session(
+                session_id,
+                state="waiting_input",
+                stage="waiting-user-clarification",
+                status="waiting_for_input",
+                last_stdout=_tail(planning_proc.stdout, MAX_STDOUT_CHARS),
+                last_stderr=_tail(planning_proc.stderr, MAX_STDERR_CHARS),
+            )
             return False, True, wt_path
 
         assumptions = plan_output["assumptions"]
@@ -680,34 +1127,214 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
         )
         plan_text = f"{plan_output['plan']}\n\nAssumptions:\n{assumptions_block}"
 
-        _post_thread(channel, thread_ts, "Stage: implement + self-review + test + PR")
-        execute_task = _build_execution_task(
+        _post_thread(channel, thread_ts, "Stage: implement + review loop")
+        approved = False
+        for review_pass in range(1, MAX_IMPLEMENT_REVIEW_LOOPS + 1):
+            _post_thread(
+                channel,
+                thread_ts,
+                f"Loop {review_pass}/{MAX_IMPLEMENT_REVIEW_LOOPS}: implementation pass",
+            )
+            implementation_task = _build_implementation_task(
+                user_task=task,
+                answers=answers,
+                workflow_guide=workflow_docs["workflow"],
+                plan_text=plan_text,
+                review_feedback=review_feedback,
+            )
+            implement_cmd = _build_command(implementation_task, phase="implement")
+            _set_runtime_state(
+                stage=f"implementation-pass-{review_pass}",
+                stage_since=time.time(),
+                command=shlex.join(implement_cmd),
+                last_status="running",
+            )
+            _update_session(
+                session_id,
+                stage=f"implementation-pass-{review_pass}",
+                status="running",
+                review_pass=review_pass,
+                command=shlex.join(implement_cmd),
+            )
+            _post_thread(
+                channel,
+                thread_ts,
+                f"Implementation command: `{shlex.join(implement_cmd)}`",
+            )
+            implement_proc = _run_with_heartbeat(
+                cmd=implement_cmd,
+                cwd=wt_path,
+                env=_mini_env(),
+                timeout_seconds=TASK_TIMEOUT_SECONDS,
+                channel=channel,
+                thread_ts=thread_ts,
+                stage_label=f"implementation pass {review_pass}",
+            )
+            implement_stdout = _tail(implement_proc.stdout, MAX_STDOUT_CHARS)
+            implement_stderr = _tail(implement_proc.stderr, MAX_STDERR_CHARS)
+            if implement_proc.returncode != 0:
+                _set_runtime_state(
+                    running=False,
+                    stage="implementation-failed",
+                    stage_since=time.time(),
+                    command="",
+                    last_status=f"failed (implement exit {implement_proc.returncode})",
+                    last_error=f"Implementation stage failed (exit {implement_proc.returncode}).",
+                    last_stdout=implement_stdout,
+                    last_stderr=implement_stderr,
+                )
+                _update_session(
+                    session_id,
+                    state="failed",
+                    stage="implementation-failed",
+                    status=f"failed (implement exit {implement_proc.returncode})",
+                    last_error=f"Implementation stage failed (exit {implement_proc.returncode}).",
+                    last_stdout=implement_stdout,
+                    last_stderr=implement_stderr,
+                    review_pass=review_pass,
+                )
+                message = f"Implementation stage failed (exit {implement_proc.returncode})."
+                if implement_stdout:
+                    message += f"\n\nstdout:\n```{implement_stdout}```"
+                if implement_stderr:
+                    message += f"\n\nstderr:\n```{implement_stderr}```"
+                _post_thread(channel, thread_ts, message)
+                return False, False, wt_path
+
+            _post_thread(channel, thread_ts, f"Loop {review_pass}/{MAX_IMPLEMENT_REVIEW_LOOPS}: review pass")
+            review_output_path = Path(wt_path) / REVIEW_OUTPUT_FILENAME
+            if review_output_path.exists():
+                review_output_path.unlink()
+            review_task = _build_review_task(
+                user_task=task,
+                answers=answers,
+                workflow_guide=workflow_docs["workflow"],
+                review_guide=workflow_docs["review"],
+                plan_text=plan_text,
+            )
+            review_cmd = _build_command(review_task, phase="review")
+            _set_runtime_state(
+                stage=f"review-pass-{review_pass}",
+                stage_since=time.time(),
+                command=shlex.join(review_cmd),
+                last_status="running",
+            )
+            _update_session(
+                session_id,
+                stage=f"review-pass-{review_pass}",
+                status="running",
+                review_pass=review_pass,
+                command=shlex.join(review_cmd),
+            )
+            _post_thread(
+                channel,
+                thread_ts,
+                f"Review command: `{shlex.join(review_cmd)}`",
+            )
+            review_proc = _run_with_heartbeat(
+                cmd=review_cmd,
+                cwd=wt_path,
+                env=_mini_env(),
+                timeout_seconds=TASK_TIMEOUT_SECONDS,
+                channel=channel,
+                thread_ts=thread_ts,
+                stage_label=f"review pass {review_pass}",
+            )
+            review_stdout = _tail(review_proc.stdout, MAX_STDOUT_CHARS)
+            review_stderr = _tail(review_proc.stderr, MAX_STDERR_CHARS)
+            if review_proc.returncode != 0:
+                _set_runtime_state(
+                    running=False,
+                    stage="review-failed",
+                    stage_since=time.time(),
+                    command="",
+                    last_status=f"failed (review exit {review_proc.returncode})",
+                    last_error=f"Review stage failed (exit {review_proc.returncode}).",
+                    last_stdout=review_stdout,
+                    last_stderr=review_stderr,
+                )
+                _update_session(
+                    session_id,
+                    state="failed",
+                    stage="review-failed",
+                    status=f"failed (review exit {review_proc.returncode})",
+                    last_error=f"Review stage failed (exit {review_proc.returncode}).",
+                    last_stdout=review_stdout,
+                    last_stderr=review_stderr,
+                    review_pass=review_pass,
+                )
+                message = f"Review stage failed (exit {review_proc.returncode})."
+                if review_stdout:
+                    message += f"\n\nstdout:\n```{review_stdout}```"
+                if review_stderr:
+                    message += f"\n\nstderr:\n```{review_stderr}```"
+                _post_thread(channel, thread_ts, message)
+                return False, False, wt_path
+
+            review_output = _load_review_output(wt_path)
+            if review_output["status"] == "approved":
+                approved = True
+                review_feedback = []
+                _post_thread(channel, thread_ts, f"Review pass {review_pass}: approved.")
+                break
+
+            review_feedback = review_output["issues"]
+            feedback_block = "\n".join(f"- {item}" for item in review_feedback)
+            _post_thread(
+                channel,
+                thread_ts,
+                (
+                    f"Review pass {review_pass}: changes requested. "
+                    "Will run another implementation pass.\n"
+                    f"Issues:\n{feedback_block}"
+                ),
+            )
+
+        if not approved:
+            _post_thread(
+                channel,
+                thread_ts,
+                (
+                    "Reached max implement/review loops without explicit review approval. "
+                    "Proceeding to test + PR with latest implementation."
+                ),
+            )
+
+        _post_thread(channel, thread_ts, "Stage: test + PR")
+        test_pr_task = _build_test_pr_task(
             user_task=task,
             answers=answers,
             workflow_guide=workflow_docs["workflow"],
             review_guide=workflow_docs["review"],
             plan_text=plan_text,
         )
-        execute_cmd = _build_command(execute_task)
+        test_pr_cmd = _build_command(test_pr_task, phase="implement")
         _set_runtime_state(
-            stage="implementation",
+            stage="test-pr",
             stage_since=time.time(),
-            command=shlex.join(execute_cmd),
+            command=shlex.join(test_pr_cmd),
             last_status="running",
+        )
+        _update_session(
+            session_id,
+            stage="test-pr",
+            status="running",
+            review_pass=review_pass,
+            command=shlex.join(test_pr_cmd),
         )
         _post_thread(
             channel,
             thread_ts,
-            f"Execution command: `{shlex.join(execute_cmd)}`",
+            f"Test/PR command: `{shlex.join(test_pr_cmd)}`",
         )
         proc = _run_with_heartbeat(
-            cmd=execute_cmd,
+            cmd=test_pr_cmd,
             cwd=wt_path,
             env=_mini_env(),
             timeout_seconds=TASK_TIMEOUT_SECONDS,
             channel=channel,
             thread_ts=thread_ts,
-            stage_label="implementation",
+            stage_label="test+pr",
         )
         stdout = _tail(proc.stdout, MAX_STDOUT_CHARS)
         stderr = _tail(proc.stderr, MAX_STDERR_CHARS)
@@ -721,6 +1348,16 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
             last_error="" if proc.returncode == 0 else f"Execution failed (exit {proc.returncode}).",
             last_stdout=stdout,
             last_stderr=stderr,
+        )
+        _update_session(
+            session_id,
+            state="completed" if proc.returncode == 0 else "failed",
+            stage="completed" if proc.returncode == 0 else "execution-failed",
+            status=status,
+            last_error="" if proc.returncode == 0 else f"Execution failed (exit {proc.returncode}).",
+            last_stdout=stdout,
+            last_stderr=stderr,
+            review_pass=review_pass,
         )
         message = f"Workflow run {status}."
         if stdout:
@@ -747,6 +1384,13 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
             last_status="timed_out",
             last_error=f"Timed out after {TASK_TIMEOUT_SECONDS} seconds.",
         )
+        _update_session(
+            session_id,
+            state="timeout",
+            stage="timeout",
+            status="timed_out",
+            last_error=f"Timed out after {TASK_TIMEOUT_SECONDS} seconds.",
+        )
         _post_thread(channel, thread_ts, f"Timed out after {TASK_TIMEOUT_SECONDS} seconds.")
         return False, False, wt_path
     except Exception as exc:
@@ -756,6 +1400,13 @@ def _run_workflow(job: dict[str, Any]) -> tuple[bool, bool, str]:
             stage_since=time.time(),
             command="",
             last_status="runner_error",
+            last_error=str(exc),
+        )
+        _update_session(
+            session_id,
+            state="failed",
+            stage="runner-error",
+            status="runner_error",
             last_error=str(exc),
         )
         _post_thread(channel, thread_ts, f"Runner error: `{exc}`")
@@ -778,7 +1429,14 @@ def on_app_mention(event: dict[str, Any], say) -> None:
             say(thread_ts=pending["thread_ts"], text=_status_message())
             return
         if normalized in {"cancel", "abort"}:
-            _pop_pending_plan(conversation_id)
+            canceled = _pop_pending_plan(conversation_id)
+            if canceled is not None:
+                _update_session(
+                    str(canceled.get("session_id", "")),
+                    state="canceled",
+                    stage="canceled",
+                    status="canceled",
+                )
             say(thread_ts=pending["thread_ts"], text="Pending planning conversation canceled.")
             return
         if not mention_text:
@@ -800,6 +1458,12 @@ def on_app_mention(event: dict[str, Any], say) -> None:
             "latest_reply": mention_text,
         }
         task_queue.put(resumed_job)
+        _update_session(
+            str(resumed.get("session_id", "")),
+            state="queued",
+            stage="queued",
+            status="queued",
+        )
         say(
             thread_ts=resumed["thread_ts"],
             text="Clarifications received. Resuming planning and execution.",
@@ -840,7 +1504,9 @@ def on_app_mention(event: dict[str, Any], say) -> None:
         say(thread_ts=event.get("ts"), text=f"Invalid repo/branch selection: `{exc}`")
         return
 
+    session_id = uuid.uuid4().hex[:10]
     job = {
+        "session_id": session_id,
         "channel": channel,
         "thread_ts": conversation_id,
         "conversation_id": conversation_id,
@@ -851,12 +1517,14 @@ def on_app_mention(event: dict[str, Any], say) -> None:
         "answers": [],
         "latest_reply": "",
     }
+    _init_session(job)
     task_queue.put(job)
     _set_runtime_state(last_status="queued")
+    _update_session(session_id, state="queued", stage="queued", status="queued")
     say(
         thread_ts=event.get("ts"),
         text=(
-            "Queued. "
+            f"Queued session=`{session_id}`. "
             f"repo=`{target['repo_alias']}` branch=`{target['branch']}`."
         ),
     )
@@ -878,4 +1546,5 @@ def worker() -> None:
 
 if __name__ == "__main__":
     threading.Thread(target=worker, daemon=True).start()
+    _start_web_ui()
     SocketModeHandler(app, SLACK_APP_TOKEN).start()

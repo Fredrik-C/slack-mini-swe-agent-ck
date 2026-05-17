@@ -1,6 +1,6 @@
-# Self Review Guide
+# Review Guide
 
-Review your own changes before finalizing.
+Review your own changes before finalizing each implementation pass.
 
 Checklist:
 - Correctness: does behavior match request?
@@ -12,5 +12,5 @@ Checklist:
 - Tests: sufficient coverage for changed behavior?
 
 Output expectations:
-- If issues are found, fix them before final output.
+- If issues are found, return to implementation and review again (max 3 review passes total).
 - If tradeoffs remain, state them explicitly.
