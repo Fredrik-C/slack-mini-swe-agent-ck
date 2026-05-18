@@ -803,15 +803,30 @@ class WorkflowRunner:
         return proc.returncode == 0
 
     def _has_meaningful_changes(self, repo_path: str) -> bool:
+        return bool(self._meaningful_changed_paths(repo_path))
+
+    def _meaningful_changed_paths(self, repo_path: str) -> list[str]:
         proc = self._run_quiet(["git", "-C", repo_path, "status", "--porcelain"])
         if proc.returncode != 0:
             details = (proc.stderr or proc.stdout).strip() or "no output"
             raise RuntimeError(f"Failed to inspect worktree changes: {details}")
 
-        ignored_paths = {
+        ignored_exact = {
             self._config.plan_output_filename,
             self._config.review_output_filename,
+            ".mini_workflow_plan.json",
+            ".mini_workflow_review.json",
         }
+        ignored_prefixes = (
+            "TestResults/",
+            "tests/TestResults/",
+        )
+        ignored_suffixes = (
+            ".trx",
+            ".coverage",
+            ".coveragexml",
+        )
+        meaningful: list[str] = []
         for raw in proc.stdout.splitlines():
             line = raw.rstrip()
             if len(line) < 4:
@@ -819,10 +834,15 @@ class WorkflowRunner:
             path_text = line[3:].strip()
             if " -> " in path_text:
                 path_text = path_text.split(" -> ", 1)[1].strip()
-            if path_text in ignored_paths:
+            normalized = path_text.replace("\\", "/")
+            if normalized in ignored_exact:
                 continue
-            return True
-        return False
+            if any(normalized.startswith(prefix) for prefix in ignored_prefixes):
+                continue
+            if any(normalized.endswith(suffix) for suffix in ignored_suffixes):
+                continue
+            meaningful.append(normalized)
+        return meaningful
 
     @staticmethod
     def _stage_command_summary(*, phase: str, cmd: list[str]) -> str:
@@ -929,10 +949,14 @@ class WorkflowRunner:
         stdout: str,
         stderr: str,
     ) -> str:
-        if self._has_meaningful_changes(worktree_path):
+        meaningful_changes = self._meaningful_changed_paths(worktree_path)
+        if meaningful_changes:
+            preview = ", ".join(meaningful_changes[:8])
+            if len(meaningful_changes) > 8:
+                preview += ", ..."
             return (
                 "Delivery check failed: working tree still has uncommitted changes after test/PR stage. "
-                "Expected committed changes pushed to a remote branch."
+                f"Blocking paths: {preview}. Expected committed changes pushed to a remote branch."
             )
 
         head_proc = self._run_quiet(["git", "-C", worktree_path, "rev-parse", "HEAD"])
