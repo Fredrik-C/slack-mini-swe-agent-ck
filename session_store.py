@@ -73,9 +73,14 @@ class SessionStore:
                 "created_at": now,
                 "updated_at": now,
                 "worktree": "",
+                "command": "",
                 "last_error": "",
                 "last_stdout": "",
                 "last_stderr": "",
+                "ck_checked": False,
+                "ck_used": False,
+                "ck_stages": [],
+                "ck_examples": [],
             }
 
             if len(self._sessions) > self._config.web_ui_max_sessions:
@@ -204,22 +209,104 @@ class SessionStore:
         runtime_stage = html.escape(str(runtime.get("stage", "")))
         runtime_status = html.escape(str(runtime.get("last_status", "")))
         pending = int(payload["pending_clarifications"])
+        runtime_stage_since = float(runtime.get("stage_since", 0.0) or 0.0)
+        runtime_elapsed = int(max(0, time.time() - runtime_stage_since)) if runtime_stage_since else 0
+        runtime_repo = html.escape(str(runtime.get("repo_alias", "")) or "(none)")
+        runtime_branch = html.escape(str(runtime.get("branch", "")) or "(none)")
+        runtime_worktree = html.escape(str(runtime.get("worktree", "")) or "(none)")
+        runtime_command = html.escape(str(runtime.get("command", "")) or "(none)")
+        runtime_ck_checked = bool(runtime.get("ck_checked", False))
+        runtime_ck_used = bool(runtime.get("ck_used", False))
+        runtime_ck_stages_raw = runtime.get("ck_stages", [])
+        runtime_ck_examples_raw = runtime.get("ck_examples", [])
+        runtime_ck_stages = (
+            ", ".join(str(item).strip() for item in runtime_ck_stages_raw if str(item).strip())
+            if isinstance(runtime_ck_stages_raw, list)
+            else ""
+        ) or "(none)"
+        runtime_ck_examples = (
+            "\n".join(str(item).strip() for item in runtime_ck_examples_raw if str(item).strip())
+            if isinstance(runtime_ck_examples_raw, list)
+            else ""
+        )
+        runtime_error = html.escape(self._tail(str(runtime.get("last_error", ""))))
+        runtime_stdout = html.escape(self._tail(str(runtime.get("last_stdout", ""))))
+        runtime_stderr = html.escape(self._tail(str(runtime.get("last_stderr", ""))))
 
         table_rows: list[str] = []
         for row in rows:
             created = self._fmt_timestamp(float(row.get("created_at", 0.0) or 0.0))
             updated = self._fmt_timestamp(float(row.get("updated_at", 0.0) or 0.0))
-            state = html.escape(str(row.get("state", "")))
-            stage = html.escape(str(row.get("stage", "")))
-            status = html.escape(str(row.get("status", "")))
+            state_raw = str(row.get("state", ""))
+            stage_raw = str(row.get("stage", ""))
+            status_raw = str(row.get("status", ""))
+            state = html.escape(state_raw)
+            stage = html.escape(stage_raw)
+            status = html.escape(status_raw)
             session_id = html.escape(str(row.get("session_id", "")))
-            repo_alias = html.escape(str(row.get("repo_alias", "")))
-            branch = html.escape(str(row.get("branch", "")))
+            repo_alias_raw = str(row.get("repo_alias", ""))
+            branch_raw = str(row.get("branch", ""))
+            repo_alias = html.escape(repo_alias_raw)
+            branch = html.escape(branch_raw)
             review_pass = int(row.get("review_pass", 0) or 0)
             max_review_passes = int(row.get("max_review_passes", 0) or 0)
-            task_text = html.escape(str(row.get("task", "")))
+            task_raw = str(row.get("task", ""))
+            task_text = html.escape(task_raw)
             task_short = task_text if len(task_text) <= 220 else f"{task_text[:220]}..."
-            error_text = html.escape(str(row.get("last_error", "")))
+            error_raw = str(row.get("last_error", ""))
+            error_text = html.escape(error_raw)
+            command_raw = str(row.get("command", ""))
+            command_text = html.escape(command_raw)
+            worktree_raw = str(row.get("worktree", ""))
+            worktree_text = html.escape(worktree_raw)
+            stdout_text = html.escape(self._tail(str(row.get("last_stdout", ""))))
+            stderr_text = html.escape(self._tail(str(row.get("last_stderr", ""))))
+            ck_checked = bool(row.get("ck_checked", False))
+            ck_used = bool(row.get("ck_used", False))
+            ck_stages_raw = row.get("ck_stages", [])
+            ck_examples_raw = row.get("ck_examples", [])
+            ck_stages_text = (
+                ", ".join(str(item).strip() for item in ck_stages_raw if str(item).strip())
+                if isinstance(ck_stages_raw, list)
+                else ""
+            ) or "(none)"
+            ck_examples_text = (
+                "\n".join(str(item).strip() for item in ck_examples_raw if str(item).strip())
+                if isinstance(ck_examples_raw, list)
+                else ""
+            )
+
+            detail_lines: list[str] = [
+                f"session_id={session_id}",
+                f"state={state_raw} stage={stage_raw} status={status_raw}",
+                f"review={review_pass}/{max_review_passes}",
+                f"repo={repo_alias_raw} branch={branch_raw}",
+                f"created={created} updated={updated}",
+            ]
+            if worktree_raw:
+                detail_lines.append(f"worktree={worktree_raw}")
+            if command_raw:
+                detail_lines.append(f"command={command_raw}")
+            if ck_checked:
+                detail_lines.append(f"ck_used={ck_used} ck_stages={ck_stages_text}")
+                if ck_examples_text:
+                    detail_lines.append("ck_examples:")
+                    detail_lines.append(ck_examples_text)
+            else:
+                detail_lines.append("ck_used=unknown")
+            if error_raw:
+                detail_lines.append("last_error:")
+                detail_lines.append(error_raw)
+            if stdout_text:
+                detail_lines.append("last_stdout_tail:")
+                detail_lines.append(html.unescape(stdout_text))
+            if stderr_text:
+                detail_lines.append("last_stderr_tail:")
+                detail_lines.append(html.unescape(stderr_text))
+            detail_lines.append("task:")
+            detail_lines.append(task_raw)
+            details_body = html.escape("\n".join(detail_lines))
+
             table_rows.append(
                 (
                     "<tr>"
@@ -234,11 +321,36 @@ class SessionStore:
                     f"<td>{created}</td>"
                     f"<td>{updated}</td>"
                     f"<td>{error_text}</td>"
+                    f"<td><details><summary>View</summary><pre>{details_body}</pre></details></td>"
                     "</tr>"
                 )
             )
 
-        rows_html = "\n".join(table_rows) if table_rows else "<tr><td colspan='11'>No sessions yet.</td></tr>"
+        rows_html = "\n".join(table_rows) if table_rows else "<tr><td colspan='12'>No sessions yet.</td></tr>"
+        runtime_details_lines = [
+            f"running={bool(runtime.get('running', False))}",
+            f"stage={html.unescape(runtime_stage)} elapsed={runtime_elapsed}s status={html.unescape(runtime_status)}",
+            f"repo={html.unescape(runtime_repo)} branch={html.unescape(runtime_branch)}",
+            f"worktree={html.unescape(runtime_worktree)}",
+            f"command={html.unescape(runtime_command)}",
+        ]
+        if runtime_ck_checked:
+            runtime_details_lines.append(f"ck_used={runtime_ck_used} ck_stages={runtime_ck_stages}")
+            if runtime_ck_examples:
+                runtime_details_lines.append("ck_examples:")
+                runtime_details_lines.append(runtime_ck_examples)
+        else:
+            runtime_details_lines.append("ck_used=unknown")
+        if runtime_error:
+            runtime_details_lines.append("last_error:")
+            runtime_details_lines.append(html.unescape(runtime_error))
+        if runtime_stdout:
+            runtime_details_lines.append("last_stdout_tail:")
+            runtime_details_lines.append(html.unescape(runtime_stdout))
+        if runtime_stderr:
+            runtime_details_lines.append("last_stderr_tail:")
+            runtime_details_lines.append(html.unescape(runtime_stderr))
+        runtime_details = html.escape("\n".join(runtime_details_lines))
         return f"""<!doctype html>
 <html>
 <head>
@@ -307,6 +419,26 @@ class SessionStore:
       color: var(--accent);
       text-decoration: none;
     }}
+    pre {{
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: Consolas, Monaco, Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.35;
+    }}
+    details summary {{
+      cursor: pointer;
+      color: var(--accent);
+      font-weight: 600;
+    }}
+    .runtime-detail {{
+      margin-top: 10px;
+      background: #f7f9fc;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+    }}
   </style>
 </head>
 <body>
@@ -314,6 +446,7 @@ class SessionStore:
   <div class="summary">
     <div>runtime_stage=<strong>{runtime_stage}</strong> runtime_status=<strong>{runtime_status}</strong></div>
     <div>queue_depth=<strong>{queue_depth}</strong> pending_clarifications=<strong>{pending}</strong> sessions=<strong>{len(rows)}</strong></div>
+    <div class="runtime-detail"><pre>{runtime_details}</pre></div>
     <div class="meta">updated {generated} | <a href="/sessions.json">sessions.json</a></div>
   </div>
   <table>
@@ -330,6 +463,7 @@ class SessionStore:
         <th>Created</th>
         <th>Updated</th>
         <th>Error</th>
+        <th>Details</th>
       </tr>
     </thead>
     <tbody>
