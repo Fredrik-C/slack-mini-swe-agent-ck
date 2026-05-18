@@ -25,6 +25,7 @@ The included image contains:
 - .NET SDK 8/9/10 (side-by-side)
 - Node.js + npm + TypeScript CLI (`tsc`)
 - Context King CLI (`ck`)
+- GitHub CLI (`gh`)
 - git/bash/curl/jq
 
 Host requirement: Docker + Docker Compose only.
@@ -249,6 +250,7 @@ Environment variables in `.env`:
 - `MINI_MODEL_CLASS` (recommended: `openrouter`): model class flag passed to `mini` as `--model-class`.
 - `MINI_MODEL_NAME` (recommended): model name passed to `mini` as `-m` (for example `openai/gpt-4.1-mini`).
 - `OPENROUTER_API_KEY` (required for `MINI_MODEL_CLASS=openrouter`): API key used by OpenRouter model execution.
+- `GH_TOKEN` (optional, recommended for auto PR): GitHub token used by `gh` CLI when creating pull requests from the test/PR stage.
 - `MINI_PLAN_MODEL_CLASS` / `MINI_PLAN_MODEL_NAME` (optional): overrides used only for planning stage.
 - `MINI_IMPLEMENT_MODEL_CLASS` / `MINI_IMPLEMENT_MODEL_NAME` (optional): overrides used for implementation and test/PR stage.
 - `MINI_REVIEW_MODEL_CLASS` / `MINI_REVIEW_MODEL_NAME` (optional): overrides used only for review stage.

@@ -15,6 +15,8 @@ services:
       WORKTREE_ROOT: /worktrees
       WEB_UI_BIND: 0.0.0.0
       WEB_UI_PORT: 8787
+      GH_TOKEN: ${GH_TOKEN:-}
+      GITHUB_TOKEN: ${GH_TOKEN:-}
       GIT_SSH_COMMAND: ssh -i /home/appuser/.ssh/id_ed25519_mini_swe -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/home/appuser/.ssh/known_hosts
     ports:
       - "8787:8787"
