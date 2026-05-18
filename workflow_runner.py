@@ -184,8 +184,9 @@ class WorkflowRunner:
         ck_stages: list[str] = []
         ck_examples: list[str] = []
 
-        def update_ck_telemetry(stage_name: str) -> None:
+        def update_ck_telemetry(stage_name: str) -> bool:
             hits = self._extract_ck_commands_from_trajectory()
+            stage_has_ck = bool(hits)
             if hits:
                 if stage_name not in ck_stages:
                     ck_stages.append(stage_name)
@@ -200,6 +201,7 @@ class WorkflowRunner:
             }
             self._store.set_runtime_state(**payload)
             self._store.update_session(session_id, **payload)
+            return stage_has_ck
 
         try:
             self._store.set_runtime_state(
@@ -277,7 +279,7 @@ class WorkflowRunner:
                 stage_label="planning",
                 post_progress=lambda text: self._post_thread(channel, thread_ts, text),
             )
-            update_ck_telemetry("planning")
+            planning_used_ck = update_ck_telemetry("planning")
             if planning_proc.returncode != 0:
                 stdout = self._tail(planning_proc.stdout, self._config.max_stdout_chars)
                 stderr = self._tail(planning_proc.stderr, self._config.max_stderr_chars)
@@ -305,6 +307,42 @@ class WorkflowRunner:
                 if stderr:
                     message += f"\n\nstderr:\n```{stderr}```"
                 self._post_thread(channel, thread_ts, message)
+                return False, False, wt_path
+            if not planning_used_ck:
+                stdout = self._tail(planning_proc.stdout, self._config.max_stdout_chars)
+                stderr = self._tail(planning_proc.stderr, self._config.max_stderr_chars)
+                error_text = (
+                    "Planning stage completed without Context King usage. "
+                    "Planning must invoke CK commands before proceeding."
+                )
+                self._store.set_runtime_state(
+                    running=False,
+                    stage="planning-missing-ck",
+                    stage_since=time.time(),
+                    command="",
+                    last_status="failed (planning missing CK)",
+                    last_error=error_text,
+                    last_stdout=stdout,
+                    last_stderr=stderr,
+                )
+                self._store.update_session(
+                    session_id,
+                    state="failed",
+                    stage="planning-missing-ck",
+                    status="failed (planning missing CK)",
+                    last_error=error_text,
+                    last_stdout=stdout,
+                    last_stderr=stderr,
+                )
+                self._post_thread(
+                    channel,
+                    thread_ts,
+                    (
+                        "Planning stage failed CK policy.\n"
+                        "No CK invocation was detected in planning execution output. "
+                        "Run aborted before implementation."
+                    ),
+                )
                 return False, False, wt_path
 
             plan_output = load_plan_output(
@@ -753,8 +791,8 @@ class WorkflowRunner:
             flags.append("--exit-immediately")
         flags_text = ",".join(flags) if flags else "(none)"
         return (
-            f"phase=`{phase}` model_class=`{model_class}` model=`{model_name}` "
-            f"flags=`{flags_text}` task_chars=`{task_chars}`"
+            f"phase={phase} model_class={model_class} model={model_name} "
+            f"flags={flags_text} task_chars={task_chars}"
         )
 
     @staticmethod

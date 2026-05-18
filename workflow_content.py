@@ -101,8 +101,9 @@ Hard requirements for this phase:
    }}
 4. If you need user input before implementation, set `"status": "needs_input"` and provide 1-3 concrete questions in `"questions"`.
 5. If planning is complete, set `"status": "ready"` and keep `"questions"` as an empty array.
-6. Validate JSON syntax (`python -m json.tool {self._config.plan_output_filename}`) before finishing.
-7. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+6. You must invoke Context King commands during planning (for example: `ck get-keyword-map`, `ck find-files`, `ck recall`).
+7. Validate JSON syntax (`python -m json.tool {self._config.plan_output_filename}`) before finishing.
+8. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
 """.strip()
 
     def build_implementation_task(
