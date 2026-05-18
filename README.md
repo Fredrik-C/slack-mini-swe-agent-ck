@@ -266,7 +266,7 @@ Environment variables in `.env`:
 - `ALLOW_CHANNEL_IDS` (optional): comma-separated Slack channel allow-list.
 - `REPO_CONFIG_PATH` (default: `repos.json`): repo/branch allow-list config file.
 - `WORKTREE_ROOT` (default: `.worktrees`): parent folder for temporary task worktrees.
-- `GIT_FETCH_BEFORE_WORKTREE` (default: `true`): run `git fetch --all --prune` before creating worktree (task fails if fetch fails).
+- `GIT_FETCH_BEFORE_WORKTREE` (must be `true`): fresh-state policy requires `git fetch --all --prune` before every worktree; runs fail fast if disabled or fetch fails.
 - `KEEP_WORKTREE_ON_FAILURE` (default: `false`): keep failed worktree for debugging.
 - `WORKFLOW_GUIDE_PATH` (default: `prompts/workflow.md`): markdown that defines required phase order and workflow expectations.
 - `PLAN_GUIDE_PATH` (default: `prompts/planning.md`): markdown that controls planning behavior and question quality.

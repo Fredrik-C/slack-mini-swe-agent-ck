@@ -105,24 +105,28 @@ class WorkflowRunner:
         if self._run_quiet(["git", "-C", repo_path, "rev-parse", "--is-inside-work-tree"]).returncode != 0:
             raise ValueError(f"Path is not a git repository: {repo_path}")
 
-        if self._config.git_fetch_before_worktree:
-            fetch_proc = self._run_quiet(["git", "-C", repo_path, "fetch", "--all", "--prune"])
-            if fetch_proc.returncode != 0:
-                details = (fetch_proc.stderr or fetch_proc.stdout).strip() or "no output"
-                raise RuntimeError(
-                    "Failed to fetch repository before worktree creation. "
-                    "Verify git credentials for private remotes. "
-                    f"git output: {details}"
-                )
+        if not self._config.git_fetch_before_worktree:
+            raise RuntimeError(
+                "Fresh-state policy requires remote fetch before every worktree. "
+                "Set GIT_FETCH_BEFORE_WORKTREE=true."
+            )
 
-        candidates = [branch, f"origin/{branch}"]
-        base_ref = ""
-        for ref in candidates:
-            if self._ref_exists(repo_path, ref):
-                base_ref = ref
-                break
-        if not base_ref:
-            raise ValueError(f"Cannot find branch/ref '{branch}' in repository: {repo_path}")
+        fetch_proc = self._run_quiet(["git", "-C", repo_path, "fetch", "--all", "--prune"])
+        if fetch_proc.returncode != 0:
+            details = (fetch_proc.stderr or fetch_proc.stdout).strip() or "no output"
+            raise RuntimeError(
+                "Failed to fetch repository before worktree creation. "
+                "Verify git credentials for private remotes. "
+                f"git output: {details}"
+            )
+
+        remote_ref = f"origin/{branch}"
+        if not self._ref_exists(repo_path, remote_ref):
+            raise ValueError(
+                f"Cannot find remote branch '{remote_ref}' in repository: {repo_path}. "
+                "Fresh-state runs require a remote-tracked branch."
+            )
+        base_ref = remote_ref
 
         worktree_root = Path(self._config.worktree_root).expanduser().resolve()
         worktree_root.mkdir(parents=True, exist_ok=True)
@@ -134,6 +138,16 @@ class WorkflowRunner:
         if add_proc.returncode != 0:
             raise RuntimeError(
                 f"Failed to create worktree: {add_proc.stderr.strip() or add_proc.stdout.strip()}"
+            )
+
+        checkout_proc = self._run_quiet(
+            ["git", "-C", wt_path, "checkout", "-B", branch, remote_ref]
+        )
+        if checkout_proc.returncode != 0:
+            self._run_quiet(["git", "-C", repo_path, "worktree", "remove", "--force", wt_path])
+            raise RuntimeError(
+                "Failed to align worktree branch with remote tip: "
+                f"{checkout_proc.stderr.strip() or checkout_proc.stdout.strip()}"
             )
         return wt_path, base_ref
 
@@ -211,18 +225,19 @@ class WorkflowRunner:
                 tooling_guide=workflow_docs["tooling"],
             )
             planning_cmd = self._mini_executor.build_command(planning_task, phase="plan")
+            planning_summary = self._stage_command_summary(phase="plan", cmd=planning_cmd)
             self._store.set_runtime_state(
                 stage="planning",
                 stage_since=time.time(),
-                command=shlex.join(planning_cmd),
+                command=planning_summary,
             )
             self._store.update_session(
                 session_id,
                 stage="planning",
                 status="running",
-                command=shlex.join(planning_cmd),
+                command=planning_summary,
             )
-            self._post_thread(channel, thread_ts, f"Planning command: `{shlex.join(planning_cmd)}`")
+            self._post_thread(channel, thread_ts, f"Planning stage invocation: {planning_summary}")
             planning_proc = self._mini_executor.run_stage(
                 cmd=planning_cmd,
                 cwd=wt_path,
@@ -332,10 +347,11 @@ class WorkflowRunner:
                     review_feedback=review_feedback,
                 )
                 implement_cmd = self._mini_executor.build_command(implementation_task, phase="implement")
+                implement_summary = self._stage_command_summary(phase="implement", cmd=implement_cmd)
                 self._store.set_runtime_state(
                     stage=f"implementation-pass-{review_pass}",
                     stage_since=time.time(),
-                    command=shlex.join(implement_cmd),
+                    command=implement_summary,
                     last_status="running",
                 )
                 self._store.update_session(
@@ -343,9 +359,13 @@ class WorkflowRunner:
                     stage=f"implementation-pass-{review_pass}",
                     status="running",
                     review_pass=review_pass,
-                    command=shlex.join(implement_cmd),
+                    command=implement_summary,
                 )
-                self._post_thread(channel, thread_ts, f"Implementation command: `{shlex.join(implement_cmd)}`")
+                self._post_thread(
+                    channel,
+                    thread_ts,
+                    f"Implementation stage invocation: {implement_summary}",
+                )
                 implement_proc = self._mini_executor.run_stage(
                     cmd=implement_cmd,
                     cwd=wt_path,
@@ -385,6 +405,54 @@ class WorkflowRunner:
                     self._post_thread(channel, thread_ts, message)
                     return False, False, wt_path
 
+                if not self._has_meaningful_changes(wt_path):
+                    no_change_issue = (
+                        "No repository changes were detected after this implementation pass. "
+                        "Apply the planned code/test edits before ending the phase."
+                    )
+                    review_feedback = [no_change_issue]
+                    if review_pass >= self._config.max_implement_review_loops:
+                        self._store.set_runtime_state(
+                            running=False,
+                            stage="implementation-no-changes",
+                            stage_since=time.time(),
+                            command="",
+                            last_status="failed (implementation made no changes)",
+                            last_error=no_change_issue,
+                            last_stdout=implement_stdout,
+                            last_stderr=implement_stderr,
+                        )
+                        self._store.update_session(
+                            session_id,
+                            state="failed",
+                            stage="implementation-no-changes",
+                            status="failed (implementation made no changes)",
+                            last_error=no_change_issue,
+                            last_stdout=implement_stdout,
+                            last_stderr=implement_stderr,
+                            review_pass=review_pass,
+                        )
+                        self._post_thread(
+                            channel,
+                            thread_ts,
+                            (
+                                "Implementation did not produce repository changes after the final retry. "
+                                "Stopping before review/test to avoid wasted cycles.\n"
+                                f"Issue:\n- {no_change_issue}"
+                            ),
+                        )
+                        return False, False, wt_path
+
+                    self._post_thread(
+                        channel,
+                        thread_ts,
+                        (
+                            f"Implementation pass {review_pass}: no code changes detected. "
+                            "Skipping review and retrying implementation with explicit feedback."
+                        ),
+                    )
+                    continue
+
                 self._post_thread(
                     channel,
                     thread_ts,
@@ -402,10 +470,11 @@ class WorkflowRunner:
                     plan_text=plan_text,
                 )
                 review_cmd = self._mini_executor.build_command(review_task, phase="review")
+                review_summary = self._stage_command_summary(phase="review", cmd=review_cmd)
                 self._store.set_runtime_state(
                     stage=f"review-pass-{review_pass}",
                     stage_since=time.time(),
-                    command=shlex.join(review_cmd),
+                    command=review_summary,
                     last_status="running",
                 )
                 self._store.update_session(
@@ -413,9 +482,9 @@ class WorkflowRunner:
                     stage=f"review-pass-{review_pass}",
                     status="running",
                     review_pass=review_pass,
-                    command=shlex.join(review_cmd),
+                    command=review_summary,
                 )
-                self._post_thread(channel, thread_ts, f"Review command: `{shlex.join(review_cmd)}`")
+                self._post_thread(channel, thread_ts, f"Review stage invocation: {review_summary}")
                 review_proc = self._mini_executor.run_stage(
                     cmd=review_cmd,
                     cwd=wt_path,
@@ -497,10 +566,11 @@ class WorkflowRunner:
                 plan_text=plan_text,
             )
             test_pr_cmd = self._mini_executor.build_command(test_pr_task, phase="implement")
+            test_pr_summary = self._stage_command_summary(phase="test-pr", cmd=test_pr_cmd)
             self._store.set_runtime_state(
                 stage="test-pr",
                 stage_since=time.time(),
-                command=shlex.join(test_pr_cmd),
+                command=test_pr_summary,
                 last_status="running",
             )
             self._store.update_session(
@@ -508,9 +578,9 @@ class WorkflowRunner:
                 stage="test-pr",
                 status="running",
                 review_pass=review_pass,
-                command=shlex.join(test_pr_cmd),
+                command=test_pr_summary,
             )
-            self._post_thread(channel, thread_ts, f"Test/PR command: `{shlex.join(test_pr_cmd)}`")
+            self._post_thread(channel, thread_ts, f"Test/PR stage invocation: {test_pr_summary}")
             proc = self._mini_executor.run_stage(
                 cmd=test_pr_cmd,
                 cwd=wt_path,
@@ -612,3 +682,49 @@ class WorkflowRunner:
     def _ref_exists(self, repo_path: str, ref: str) -> bool:
         proc = self._run_quiet(["git", "-C", repo_path, "rev-parse", "--verify", "--quiet", ref])
         return proc.returncode == 0
+
+    def _has_meaningful_changes(self, repo_path: str) -> bool:
+        proc = self._run_quiet(["git", "-C", repo_path, "status", "--porcelain"])
+        if proc.returncode != 0:
+            details = (proc.stderr or proc.stdout).strip() or "no output"
+            raise RuntimeError(f"Failed to inspect worktree changes: {details}")
+
+        ignored_paths = {
+            self._config.plan_output_filename,
+            self._config.review_output_filename,
+        }
+        for raw in proc.stdout.splitlines():
+            line = raw.rstrip()
+            if len(line) < 4:
+                continue
+            path_text = line[3:].strip()
+            if " -> " in path_text:
+                path_text = path_text.split(" -> ", 1)[1].strip()
+            if path_text in ignored_paths:
+                continue
+            return True
+        return False
+
+    @staticmethod
+    def _stage_command_summary(*, phase: str, cmd: list[str]) -> str:
+        model_class = WorkflowRunner._extract_arg_value(cmd, "--model-class") or "(default)"
+        model_name = WorkflowRunner._extract_arg_value(cmd, "-m") or "(default)"
+        task_text = WorkflowRunner._extract_arg_value(cmd, "-t")
+        task_chars = len(task_text) if task_text else 0
+        flags: list[str] = []
+        if "-y" in cmd:
+            flags.append("-y")
+        if "--exit-immediately" in cmd:
+            flags.append("--exit-immediately")
+        flags_text = ",".join(flags) if flags else "(none)"
+        return (
+            f"phase=`{phase}` model_class=`{model_class}` model=`{model_name}` "
+            f"flags=`{flags_text}` task_chars=`{task_chars}`"
+        )
+
+    @staticmethod
+    def _extract_arg_value(cmd: list[str], flag: str) -> str:
+        for idx in range(len(cmd) - 1):
+            if cmd[idx] == flag:
+                return cmd[idx + 1]
+        return ""
