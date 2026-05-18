@@ -184,6 +184,9 @@ class WorkflowRunner:
         ck_stages: list[str] = []
         ck_examples: list[str] = []
 
+        def append_live_output(stage_name: str, line: str) -> None:
+            self._store.append_runtime_output_line(f"[{stage_name}] {line}")
+
         def update_ck_telemetry(stage_name: str, *, stage_stdout: str = "", stage_stderr: str = "") -> bool:
             hits = self._extract_ck_commands_from_trajectory()
             text_hits = self._extract_ck_commands_from_text(stage_stdout, stage_stderr)
@@ -224,6 +227,7 @@ class WorkflowRunner:
                 ck_used=False,
                 ck_stages=[],
                 ck_examples=[],
+                live_output=[],
             )
             self._store.update_session(
                 session_id,
@@ -238,6 +242,7 @@ class WorkflowRunner:
                 ck_used=False,
                 ck_stages=[],
                 ck_examples=[],
+                live_output=[],
             )
             wt_path, base_ref = self.prepare_worktree(repo_path, branch)
             self._store.set_runtime_state(worktree=wt_path)
@@ -282,6 +287,7 @@ class WorkflowRunner:
                 timeout_seconds=self._config.task_timeout_seconds,
                 stage_label="planning",
                 post_progress=lambda text: self._post_thread(channel, thread_ts, text),
+                on_output_line=lambda line: append_live_output("planning", line),
             )
             planning_used_ck = update_ck_telemetry(
                 "planning",
@@ -451,6 +457,10 @@ class WorkflowRunner:
                     timeout_seconds=self._config.task_timeout_seconds,
                     stage_label=f"implementation pass {review_pass}",
                     post_progress=lambda text: self._post_thread(channel, thread_ts, text),
+                    on_output_line=lambda line, rp=review_pass: append_live_output(
+                        f"implementation-pass-{rp}",
+                        line,
+                    ),
                 )
                 update_ck_telemetry(
                     f"implementation-pass-{review_pass}",
@@ -575,6 +585,10 @@ class WorkflowRunner:
                     timeout_seconds=self._config.task_timeout_seconds,
                     stage_label=f"review pass {review_pass}",
                     post_progress=lambda text: self._post_thread(channel, thread_ts, text),
+                    on_output_line=lambda line, rp=review_pass: append_live_output(
+                        f"review-pass-{rp}",
+                        line,
+                    ),
                 )
                 update_ck_telemetry(
                     f"review-pass-{review_pass}",
@@ -676,6 +690,7 @@ class WorkflowRunner:
                 timeout_seconds=self._config.task_timeout_seconds,
                 stage_label="test+pr",
                 post_progress=lambda text: self._post_thread(channel, thread_ts, text),
+                on_output_line=lambda line: append_live_output("test-pr", line),
             )
             update_ck_telemetry("test-pr", stage_stdout=proc.stdout, stage_stderr=proc.stderr)
             delivery_issue = ""

@@ -37,6 +37,7 @@ class SessionStore:
             "ck_used": False,
             "ck_stages": [],
             "ck_examples": [],
+            "live_output": [],
         }
         self._sessions_lock = threading.Lock()
         self._sessions: dict[str, dict[str, Any]] = {}
@@ -49,6 +50,20 @@ class SessionStore:
     def snapshot_runtime_state(self) -> dict[str, Any]:
         with self._runtime_state_lock:
             return dict(self._runtime_state)
+
+    def append_runtime_output_line(self, line: str, max_lines: int = 400) -> None:
+        text = str(line).rstrip()
+        if not text:
+            return
+        with self._runtime_state_lock:
+            current = self._runtime_state.get("live_output", [])
+            if not isinstance(current, list):
+                current = []
+            current.append(text)
+            if len(current) > max_lines:
+                current = current[-max_lines:]
+            self._runtime_state["live_output"] = current
+            self._runtime_state["last_update"] = time.time()
 
     def init_session(self, job: dict[str, Any]) -> None:
         session_id = str(job.get("session_id", "")).strip()
@@ -159,6 +174,7 @@ class SessionStore:
         ck_used = bool(state.get("ck_used", False))
         ck_stages_raw = state.get("ck_stages", [])
         ck_examples_raw = state.get("ck_examples", [])
+        live_output_raw = state.get("live_output", [])
         last_error = self._tail(str(state.get("last_error", "")))
         last_stdout = self._tail(str(state.get("last_stdout", "")))
         last_stderr = self._tail(str(state.get("last_stderr", "")))
@@ -166,6 +182,7 @@ class SessionStore:
         elapsed = int(max(0, time.time() - stage_since)) if stage_since else 0
         ck_stages = [str(item).strip() for item in ck_stages_raw if str(item).strip()] if isinstance(ck_stages_raw, list) else []
         ck_examples = [str(item).strip() for item in ck_examples_raw if str(item).strip()] if isinstance(ck_examples_raw, list) else []
+        live_output = [str(item) for item in live_output_raw if str(item).strip()] if isinstance(live_output_raw, list) else []
 
         lines = [
             f"running=`{running}` stage=`{stage}` elapsed=`{elapsed}s`",
@@ -190,6 +207,8 @@ class SessionStore:
             lines.append(f"last_stdout_tail:\n```{last_stdout}```")
         if last_stderr:
             lines.append(f"last_stderr_tail:\n```{last_stderr}```")
+        if live_output:
+            lines.append(f"live_output_tail:\n```{self._tail_lines(live_output, 25)}```")
         return "\n".join(lines)
 
     def sessions_payload(self, *, queue_depth: int) -> dict[str, Any]:
@@ -219,6 +238,7 @@ class SessionStore:
         runtime_ck_used = bool(runtime.get("ck_used", False))
         runtime_ck_stages_raw = runtime.get("ck_stages", [])
         runtime_ck_examples_raw = runtime.get("ck_examples", [])
+        runtime_live_output_raw = runtime.get("live_output", [])
         runtime_ck_stages = (
             ", ".join(str(item).strip() for item in runtime_ck_stages_raw if str(item).strip())
             if isinstance(runtime_ck_stages_raw, list)
@@ -232,6 +252,11 @@ class SessionStore:
         runtime_error = html.escape(self._tail(str(runtime.get("last_error", ""))))
         runtime_stdout = html.escape(self._tail(str(runtime.get("last_stdout", ""))))
         runtime_stderr = html.escape(self._tail(str(runtime.get("last_stderr", ""))))
+        runtime_live_output = (
+            "\n".join(str(item) for item in runtime_live_output_raw if str(item).strip())
+            if isinstance(runtime_live_output_raw, list)
+            else ""
+        )
 
         table_rows: list[str] = []
         for row in rows:
@@ -350,6 +375,9 @@ class SessionStore:
         if runtime_stderr:
             runtime_details_lines.append("last_stderr_tail:")
             runtime_details_lines.append(html.unescape(runtime_stderr))
+        if runtime_live_output:
+            runtime_details_lines.append("live_output_tail:")
+            runtime_details_lines.append(self._tail_lines(runtime_live_output.splitlines(), 80))
         runtime_details = html.escape("\n".join(runtime_details_lines))
         return f"""<!doctype html>
 <html>
@@ -493,3 +521,11 @@ class SessionStore:
         if not text:
             return ""
         return text[-max_chars:] if len(text) > max_chars else text
+
+    @staticmethod
+    def _tail_lines(lines: list[str], max_lines: int) -> str:
+        if not lines:
+            return ""
+        if len(lines) <= max_lines:
+            return "\n".join(lines)
+        return "\n".join(lines[-max_lines:])

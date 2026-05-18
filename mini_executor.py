@@ -78,6 +78,7 @@ class MiniExecutor:
         timeout_seconds: int,
         stage_label: str,
         post_progress: Callable[[str], None],
+        on_output_line: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         attempts = 0
         stage_env = dict(env)
@@ -90,6 +91,7 @@ class MiniExecutor:
                 timeout_seconds=timeout_seconds,
                 stage_label=stage_label if attempts == 1 else f"{stage_label} retry {attempts - 1}",
                 post_progress=post_progress,
+                on_output_line=on_output_line,
             )
             if proc.returncode == 0:
                 return proc
@@ -129,23 +131,66 @@ class MiniExecutor:
         timeout_seconds: int,
         stage_label: str,
         post_progress: Callable[[str], None],
+        on_output_line: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        result: dict[str, object] = {}
+        result: dict[str, object] = {"stdout": [], "stderr": []}
+
+        def _emit(line: str) -> None:
+            if on_output_line is None:
+                return
+            try:
+                on_output_line(line)
+            except Exception:
+                return
+
+        def _read_stream(stream, key: str, prefix: str) -> None:
+            try:
+                for raw_line in stream:
+                    result[key].append(raw_line)
+                    line = raw_line.rstrip("\r\n")
+                    if line:
+                        _emit(f"{prefix} {line}")
+            finally:
+                stream.close()
 
         def _runner() -> None:
             try:
-                result["proc"] = subprocess.run(
+                popen = subprocess.Popen(
                     cmd,
                     cwd=cwd,
                     env=env,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=timeout_seconds,
+                    bufsize=1,
                 )
+                result["popen"] = popen
+                stdout_thread = threading.Thread(
+                    target=_read_stream,
+                    args=(popen.stdout, "stdout", "[stdout]"),  # type: ignore[arg-type]
+                    daemon=True,
+                )
+                stderr_thread = threading.Thread(
+                    target=_read_stream,
+                    args=(popen.stderr, "stderr", "[stderr]"),  # type: ignore[arg-type]
+                    daemon=True,
+                )
+                stdout_thread.start()
+                stderr_thread.start()
+                result["stdout_thread"] = stdout_thread
+                result["stderr_thread"] = stderr_thread
+                result["returncode"] = popen.wait(timeout=timeout_seconds)
+                stdout_thread.join(timeout=3)
+                stderr_thread.join(timeout=3)
             except Exception as exc:  # pragma: no cover - passthrough
+                popen = result.get("popen")
+                if isinstance(popen, subprocess.Popen):
+                    try:
+                        popen.kill()
+                    except Exception:
+                        pass
                 result["error"] = exc
 
-        thread = threading.Thread(target=_runner, daemon=True)
         start = time.time()
         thread.start()
 
@@ -160,4 +205,11 @@ class MiniExecutor:
 
         if "error" in result:
             raise result["error"]  # type: ignore[misc]
-        return result["proc"]  # type: ignore[return-value]
+        stdout_text = "".join(result["stdout"])  # type: ignore[arg-type]
+        stderr_text = "".join(result["stderr"])  # type: ignore[arg-type]
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=int(result.get("returncode", 1)),
+            stdout=stdout_text,
+            stderr=stderr_text,
+        )
