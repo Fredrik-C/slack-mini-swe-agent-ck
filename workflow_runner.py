@@ -864,8 +864,11 @@ class WorkflowRunner:
 
     def _extract_ck_commands_from_text(self, *parts: str) -> list[str]:
         hits: list[str] = []
-        cmd_line_pattern = re.compile(
-            r"(?i)(?:^|\s)(?:cd\s+\S+\s*&&\s*)?(ck|~/.ck/bin/ck|[^ \t\n\r`\"']*ck\.exe)\b"
+        direct_cmd_pattern = re.compile(
+            r"(?i)^\s*(ck|~/.ck/bin/ck|[^ \t\n\r`\"']*ck\.exe)\b"
+        )
+        chained_cmd_pattern = re.compile(
+            r"(?i)\bcd\s+\S+\s*&&\s*(ck|~/.ck/bin/ck|[^ \t\n\r`\"']*ck\.exe)\b"
         )
         for part in parts:
             if not part:
@@ -874,12 +877,25 @@ class WorkflowRunner:
                 line = raw_line.strip()
                 if not line:
                     continue
-                if not cmd_line_pattern.search(line):
+                lower = line.lower()
+                if lower.startswith(("context king", "use context king", "required navigation sequence")):
                     continue
-                if line.lower().startswith(("context king", "use context king", "required navigation sequence")):
+                if lower.startswith(("- ", "* ", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.")):
                     continue
-                if line not in hits:
-                    hits.append(line)
+                if "`ck " in lower or " ck " in lower and "`" in line:
+                    # Prompt text often contains markdown examples like `ck ...`; skip these.
+                    continue
+
+                matched = ""
+                if direct_cmd_pattern.search(line):
+                    matched = line
+                else:
+                    chain_match = chained_cmd_pattern.search(line)
+                    if chain_match:
+                        matched = line
+
+                if matched and matched not in hits:
+                    hits.append(matched)
         return hits
 
     @staticmethod
