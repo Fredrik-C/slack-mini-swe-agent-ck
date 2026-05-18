@@ -39,7 +39,9 @@ RUN pip3 install --no-cache-dir --break-system-packages -r /app/requirements.txt
 COPY . /app
 
 RUN curl -fsSL "${CK_INSTALL_URL}" | bash \
-    && ln -sf /root/.ck/bin/ck /usr/local/bin/ck \
+    && mkdir -p /home/appuser/.ck \
+    && cp -a /root/.ck/. /home/appuser/.ck/ \
+    && ln -sf /home/appuser/.ck/bin/ck /usr/local/bin/ck \
     && mkdir -p /home/appuser/.config/litellm \
     && chown -R "${PUID}:${PGID}" /app /home/appuser
 
