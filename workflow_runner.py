@@ -184,8 +184,12 @@ class WorkflowRunner:
         ck_stages: list[str] = []
         ck_examples: list[str] = []
 
-        def update_ck_telemetry(stage_name: str) -> bool:
+        def update_ck_telemetry(stage_name: str, *, stage_stdout: str = "", stage_stderr: str = "") -> bool:
             hits = self._extract_ck_commands_from_trajectory()
+            text_hits = self._extract_ck_commands_from_text(stage_stdout, stage_stderr)
+            for item in text_hits:
+                if item not in hits:
+                    hits.append(item)
             stage_has_ck = bool(hits)
             if hits:
                 if stage_name not in ck_stages:
@@ -279,7 +283,11 @@ class WorkflowRunner:
                 stage_label="planning",
                 post_progress=lambda text: self._post_thread(channel, thread_ts, text),
             )
-            planning_used_ck = update_ck_telemetry("planning")
+            planning_used_ck = update_ck_telemetry(
+                "planning",
+                stage_stdout=planning_proc.stdout,
+                stage_stderr=planning_proc.stderr,
+            )
             if planning_proc.returncode != 0:
                 stdout = self._tail(planning_proc.stdout, self._config.max_stdout_chars)
                 stderr = self._tail(planning_proc.stderr, self._config.max_stderr_chars)
@@ -444,7 +452,11 @@ class WorkflowRunner:
                     stage_label=f"implementation pass {review_pass}",
                     post_progress=lambda text: self._post_thread(channel, thread_ts, text),
                 )
-                update_ck_telemetry(f"implementation-pass-{review_pass}")
+                update_ck_telemetry(
+                    f"implementation-pass-{review_pass}",
+                    stage_stdout=implement_proc.stdout,
+                    stage_stderr=implement_proc.stderr,
+                )
                 implement_stdout = self._tail(implement_proc.stdout, self._config.max_stdout_chars)
                 implement_stderr = self._tail(implement_proc.stderr, self._config.max_stderr_chars)
                 if implement_proc.returncode != 0:
@@ -564,7 +576,11 @@ class WorkflowRunner:
                     stage_label=f"review pass {review_pass}",
                     post_progress=lambda text: self._post_thread(channel, thread_ts, text),
                 )
-                update_ck_telemetry(f"review-pass-{review_pass}")
+                update_ck_telemetry(
+                    f"review-pass-{review_pass}",
+                    stage_stdout=review_proc.stdout,
+                    stage_stderr=review_proc.stderr,
+                )
                 review_stdout = self._tail(review_proc.stdout, self._config.max_stdout_chars)
                 review_stderr = self._tail(review_proc.stderr, self._config.max_stderr_chars)
                 if review_proc.returncode != 0:
@@ -661,7 +677,7 @@ class WorkflowRunner:
                 stage_label="test+pr",
                 post_progress=lambda text: self._post_thread(channel, thread_ts, text),
             )
-            update_ck_telemetry("test-pr")
+            update_ck_telemetry("test-pr", stage_stdout=proc.stdout, stage_stderr=proc.stderr)
             delivery_issue = ""
             if proc.returncode == 0:
                 delivery_issue = self._validate_delivery(
@@ -844,6 +860,26 @@ class WorkflowRunner:
                     walk(item)
 
         walk(data)
+        return hits
+
+    def _extract_ck_commands_from_text(self, *parts: str) -> list[str]:
+        hits: list[str] = []
+        cmd_line_pattern = re.compile(
+            r"(?i)(?:^|\s)(?:cd\s+\S+\s*&&\s*)?(ck|~/.ck/bin/ck|[^ \t\n\r`\"']*ck\.exe)\b"
+        )
+        for part in parts:
+            if not part:
+                continue
+            for raw_line in part.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if not cmd_line_pattern.search(line):
+                    continue
+                if line.lower().startswith(("context king", "use context king", "required navigation sequence")):
+                    continue
+                if line not in hits:
+                    hits.append(line)
         return hits
 
     @staticmethod
