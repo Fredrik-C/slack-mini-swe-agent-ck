@@ -170,7 +170,7 @@ class SessionStore:
         if worktree:
             lines.append(f"worktree=`{worktree}`")
         if command:
-            lines.append(f"command=`{command}`")
+            lines.append(f"command={command}")
         if ck_checked:
             stage_text = ",".join(ck_stages) if ck_stages else "(none)"
             lines.append(f"ck_used=`{ck_used}` ck_stages=`{stage_text}`")

@@ -101,9 +101,10 @@ Hard requirements for this phase:
    }}
 4. If you need user input before implementation, set `"status": "needs_input"` and provide 1-3 concrete questions in `"questions"`.
 5. If planning is complete, set `"status": "ready"` and keep `"questions"` as an empty array.
-6. You must invoke Context King commands during planning (for example: `ck get-keyword-map`, `ck find-files`, `ck recall`).
-7. Validate JSON syntax (`python -m json.tool {self._config.plan_output_filename}`) before finishing.
-8. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+6. Do not `cd` outside the current working directory/worktree. Do not run commands against `/repos/...` paths.
+7. You must invoke Context King commands during planning (for example: `ck get-keyword-map`, `ck find-files`, `ck recall`).
+8. Validate JSON syntax (`python -m json.tool {self._config.plan_output_filename}`) before finishing.
+9. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
 """.strip()
 
     def build_implementation_task(
@@ -140,7 +141,8 @@ Implementation requirements:
 1. Modify code to satisfy the plan and review feedback.
 2. Do not run full test suite yet.
 3. Do not create a pull request yet.
-4. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+4. Do not `cd` outside the current working directory/worktree. Do not run commands against `/repos/...` paths.
+5. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
 """.strip()
 
     def build_review_task(
@@ -183,8 +185,9 @@ Hard requirements for this phase:
    }}
 5. If changes are needed, set `"status": "needs_changes"` and provide concrete issues to fix.
 6. If implementation is acceptable, set `"status": "approved"` and keep `"issues"` as an empty array.
-7. Validate JSON syntax (`python -m json.tool {self._config.review_output_filename}`) before finishing.
-8. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+7. Do not `cd` outside the current working directory/worktree. Do not run commands against `/repos/...` paths.
+8. Validate JSON syntax (`python -m json.tool {self._config.review_output_filename}`) before finishing.
+9. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
 """.strip()
 
     def build_test_pr_task(
@@ -217,8 +220,11 @@ User clarifications:
 Execution requirements for this phase:
 1. Do not make broad feature changes unless required to fix failing tests or review-identified defects.
 2. Run relevant tests/verification commands.
-3. Create a PR if tooling/auth allows it; if blocked, clearly report the blocker and exact command/output.
-4. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+3. Create a PR if tooling/auth allows it.
+4. If PR is created, include the full PR URL in output.
+5. If PR cannot be created, include a clear blocker line that starts with `BLOCKER:` and include exact command/output.
+6. Do not `cd` outside the current working directory/worktree. Do not run commands against `/repos/...` paths.
+7. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
 """.strip()
 
 

@@ -662,6 +662,21 @@ class WorkflowRunner:
                 post_progress=lambda text: self._post_thread(channel, thread_ts, text),
             )
             update_ck_telemetry("test-pr")
+            delivery_issue = ""
+            if proc.returncode == 0:
+                delivery_issue = self._validate_delivery(
+                    worktree_path=wt_path,
+                    base_branch=branch,
+                    stdout=proc.stdout,
+                    stderr=proc.stderr,
+                )
+                if delivery_issue:
+                    proc = subprocess.CompletedProcess(
+                        args=proc.args,
+                        returncode=90,
+                        stdout=proc.stdout,
+                        stderr=(proc.stderr + ("\n" if proc.stderr else "") + delivery_issue),
+                    )
             stdout = self._tail(proc.stdout, self._config.max_stdout_chars)
             stderr = self._tail(proc.stderr, self._config.max_stderr_chars)
             status = "completed" if proc.returncode == 0 else f"failed (exit {proc.returncode})"
@@ -838,3 +853,50 @@ class WorkflowRunner:
             flags=re.IGNORECASE,
         )
         return bool(pattern.search(command_text))
+
+    def _validate_delivery(
+        self,
+        *,
+        worktree_path: str,
+        base_branch: str,
+        stdout: str,
+        stderr: str,
+    ) -> str:
+        if self._has_meaningful_changes(worktree_path):
+            return (
+                "Delivery check failed: working tree still has uncommitted changes after test/PR stage. "
+                "Expected committed changes pushed to a remote branch."
+            )
+
+        head_proc = self._run_quiet(["git", "-C", worktree_path, "rev-parse", "HEAD"])
+        base_proc = self._run_quiet(["git", "-C", worktree_path, "rev-parse", f"origin/{base_branch}"])
+        if head_proc.returncode != 0 or base_proc.returncode != 0:
+            return "Delivery check failed: unable to resolve HEAD/origin branch commit for verification."
+        head_sha = head_proc.stdout.strip()
+        base_sha = base_proc.stdout.strip()
+        if head_sha == base_sha:
+            return (
+                "Delivery check failed: HEAD equals origin base branch, so no new committed deliverable was produced."
+            )
+
+        combined = f"{stdout}\n{stderr}"
+        pr_pattern = re.compile(
+            r"https?://github\.com/[^\s/]+/[^\s/]+/pull/(?:\d+|new/[^\s`]+)",
+            flags=re.IGNORECASE,
+        )
+        if pr_pattern.search(combined):
+            return ""
+
+        blocker_pattern = re.compile(
+            r"(blocker|cannot create pr|failed to push|push failed|gh cli not available|no github token|not authenticated|authentication failed)",
+            flags=re.IGNORECASE,
+        )
+        if blocker_pattern.search(combined):
+            return (
+                "Delivery check failed: PR was not created. A blocker was reported instead; "
+                "run is marked failed so delivery is explicit."
+            )
+
+        return (
+            "Delivery check failed: no PR URL or delivery blocker was reported by test/PR stage output."
+        )
