@@ -4,6 +4,8 @@ This repository contains a small Python worker that listens to Slack mentions vi
 
 It does not require inbound webhooks or a public server URL.
 
+> This project is a proof-of-concept (POC) meant for inspiration and experimentation. Treat it as a starting point, not a production-ready system.
+
 ## What It Does
 
 - Receives `app_mention` events in Slack.
@@ -14,7 +16,7 @@ It does not require inbound webhooks or a public server URL.
 - Creates a dedicated git worktree per task, runs in that worktree, then removes it.
 - If planning needs clarification, asks questions in the same Slack thread and resumes after user reply.
 - Posts completion status and output back to the same Slack thread.
-- Exposes a lightweight web UI for session/task status.
+- Exposes a simple streaming web UI for session/task status and live stage output tails.
 
 ## Container-First Deployment (Recommended)
 
@@ -164,6 +166,12 @@ Web UI:
 
 - `http://<host>:8787/`
 - JSON API: `http://<host>:8787/sessions.json`
+
+The web UI includes:
+
+- Current runtime state (stage/status/repo/branch/worktree/command)
+- Live output tail while a stage is running (stdout/stderr lines as they arrive)
+- Per-session details (task, command, errors, output tails, CK telemetry)
 
 Verify non-root runtime:
 
