@@ -191,6 +191,7 @@ class MiniExecutor:
                         pass
                 result["error"] = exc
 
+        thread = threading.Thread(target=_runner, daemon=True)
         start = time.time()
         thread.start()
 
