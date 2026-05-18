@@ -33,6 +33,10 @@ class SessionStore:
             "last_error": "",
             "last_stdout": "",
             "last_stderr": "",
+            "ck_checked": False,
+            "ck_used": False,
+            "ck_stages": [],
+            "ck_examples": [],
         }
         self._sessions_lock = threading.Lock()
         self._sessions: dict[str, dict[str, Any]] = {}
@@ -146,11 +150,17 @@ class SessionStore:
         branch = str(state.get("branch", ""))
         worktree = str(state.get("worktree", ""))
         command = str(state.get("command", ""))
+        ck_checked = bool(state.get("ck_checked", False))
+        ck_used = bool(state.get("ck_used", False))
+        ck_stages_raw = state.get("ck_stages", [])
+        ck_examples_raw = state.get("ck_examples", [])
         last_error = self._tail(str(state.get("last_error", "")))
         last_stdout = self._tail(str(state.get("last_stdout", "")))
         last_stderr = self._tail(str(state.get("last_stderr", "")))
         stage_since = float(state.get("stage_since", 0.0) or 0.0)
         elapsed = int(max(0, time.time() - stage_since)) if stage_since else 0
+        ck_stages = [str(item).strip() for item in ck_stages_raw if str(item).strip()] if isinstance(ck_stages_raw, list) else []
+        ck_examples = [str(item).strip() for item in ck_examples_raw if str(item).strip()] if isinstance(ck_examples_raw, list) else []
 
         lines = [
             f"running=`{running}` stage=`{stage}` elapsed=`{elapsed}s`",
@@ -161,6 +171,14 @@ class SessionStore:
             lines.append(f"worktree=`{worktree}`")
         if command:
             lines.append(f"command=`{command}`")
+        if ck_checked:
+            stage_text = ",".join(ck_stages) if ck_stages else "(none)"
+            lines.append(f"ck_used=`{ck_used}` ck_stages=`{stage_text}`")
+            if ck_examples:
+                sample = "\n".join(ck_examples[:3])
+                lines.append(f"ck_examples:\n```{sample}```")
+        else:
+            lines.append("ck_used=`unknown` (no completed stage telemetry yet)")
         if last_error:
             lines.append(f"last_error:\n```{last_error}```")
         if last_stdout:

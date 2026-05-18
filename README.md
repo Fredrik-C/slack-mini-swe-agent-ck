@@ -274,6 +274,7 @@ Environment variables in `.env`:
 - `TOOLING_GUIDE_PATH` (default: `prompts/tooling.md`): markdown injected into all phases for language/runtime build-test guidance and Context King protocol usage.
 - `PLAN_OUTPUT_FILENAME` (default: `.mini_workflow_plan.json`): planning-stage JSON handshake file written inside each task worktree.
 - `REVIEW_OUTPUT_FILENAME` (default: `.mini_workflow_review.json`): review-stage JSON handshake file written inside each task worktree.
+- `MINI_TRAJECTORY_PATH` (default: `~/.config/mini-swe-agent/last_mini_run.traj.json`): trajectory file parsed after each stage to detect CK command invocations for `status` telemetry.
 - `MAX_IMPLEMENT_REVIEW_LOOPS` (default: `3`): max implement/review loop count before moving to test/PR.
 - `WEB_UI_ENABLED` (default: `true`): enable local web status UI.
 - `WEB_UI_BIND` (default: `0.0.0.0`): bind address for UI HTTP server.

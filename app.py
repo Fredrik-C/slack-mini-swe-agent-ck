@@ -80,6 +80,10 @@ WORKFLOW_GUIDE_PATH = os.getenv("WORKFLOW_GUIDE_PATH", "prompts/workflow.md")
 TOOLING_GUIDE_PATH = os.getenv("TOOLING_GUIDE_PATH", "prompts/tooling.md")
 PLAN_OUTPUT_FILENAME = os.getenv("PLAN_OUTPUT_FILENAME", ".mini_workflow_plan.json")
 REVIEW_OUTPUT_FILENAME = os.getenv("REVIEW_OUTPUT_FILENAME", ".mini_workflow_review.json")
+MINI_TRAJECTORY_PATH = os.getenv(
+    "MINI_TRAJECTORY_PATH",
+    "~/.config/mini-swe-agent/last_mini_run.traj.json",
+)
 MAX_IMPLEMENT_REVIEW_LOOPS = int(os.getenv("MAX_IMPLEMENT_REVIEW_LOOPS", "3"))
 WEB_UI_ENABLED = _bool_env("WEB_UI_ENABLED", True)
 WEB_UI_BIND = os.getenv("WEB_UI_BIND", "0.0.0.0").strip() or "0.0.0.0"
@@ -159,6 +163,7 @@ workflow_runner = WorkflowRunner(
         git_fetch_before_worktree=GIT_FETCH_BEFORE_WORKTREE,
         keep_worktree_on_failure=KEEP_WORKTREE_ON_FAILURE,
         worktree_root=WORKTREE_ROOT,
+        mini_trajectory_path=MINI_TRAJECTORY_PATH,
     ),
     repo_config=REPO_CONFIG,
     store=store,

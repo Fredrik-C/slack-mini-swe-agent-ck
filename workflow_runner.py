@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import fnmatch
+import json
+import re
 import shlex
 import subprocess
 import time
@@ -34,6 +36,7 @@ class WorkflowRunnerConfig:
     git_fetch_before_worktree: bool
     keep_worktree_on_failure: bool
     worktree_root: str
+    mini_trajectory_path: str
 
 
 class WorkflowRunner:
@@ -178,6 +181,26 @@ class WorkflowRunner:
         keep_worktree = False
         review_feedback: list[str] = []
         review_pass = 0
+        ck_stages: list[str] = []
+        ck_examples: list[str] = []
+
+        def update_ck_telemetry(stage_name: str) -> None:
+            hits = self._extract_ck_commands_from_trajectory()
+            if hits:
+                if stage_name not in ck_stages:
+                    ck_stages.append(stage_name)
+                for item in hits:
+                    if item not in ck_examples:
+                        ck_examples.append(item)
+            payload = {
+                "ck_checked": True,
+                "ck_used": bool(ck_stages),
+                "ck_stages": list(ck_stages),
+                "ck_examples": list(ck_examples[:5]),
+            }
+            self._store.set_runtime_state(**payload)
+            self._store.update_session(session_id, **payload)
+
         try:
             self._store.set_runtime_state(
                 running=True,
@@ -191,6 +214,10 @@ class WorkflowRunner:
                 last_error="",
                 last_stdout="",
                 last_stderr="",
+                ck_checked=False,
+                ck_used=False,
+                ck_stages=[],
+                ck_examples=[],
             )
             self._store.update_session(
                 session_id,
@@ -201,6 +228,10 @@ class WorkflowRunner:
                 last_error="",
                 last_stdout="",
                 last_stderr="",
+                ck_checked=False,
+                ck_used=False,
+                ck_stages=[],
+                ck_examples=[],
             )
             wt_path, base_ref = self.prepare_worktree(repo_path, branch)
             self._store.set_runtime_state(worktree=wt_path)
@@ -246,6 +277,7 @@ class WorkflowRunner:
                 stage_label="planning",
                 post_progress=lambda text: self._post_thread(channel, thread_ts, text),
             )
+            update_ck_telemetry("planning")
             if planning_proc.returncode != 0:
                 stdout = self._tail(planning_proc.stdout, self._config.max_stdout_chars)
                 stderr = self._tail(planning_proc.stderr, self._config.max_stderr_chars)
@@ -374,6 +406,7 @@ class WorkflowRunner:
                     stage_label=f"implementation pass {review_pass}",
                     post_progress=lambda text: self._post_thread(channel, thread_ts, text),
                 )
+                update_ck_telemetry(f"implementation-pass-{review_pass}")
                 implement_stdout = self._tail(implement_proc.stdout, self._config.max_stdout_chars)
                 implement_stderr = self._tail(implement_proc.stderr, self._config.max_stderr_chars)
                 if implement_proc.returncode != 0:
@@ -493,6 +526,7 @@ class WorkflowRunner:
                     stage_label=f"review pass {review_pass}",
                     post_progress=lambda text: self._post_thread(channel, thread_ts, text),
                 )
+                update_ck_telemetry(f"review-pass-{review_pass}")
                 review_stdout = self._tail(review_proc.stdout, self._config.max_stdout_chars)
                 review_stderr = self._tail(review_proc.stderr, self._config.max_stderr_chars)
                 if review_proc.returncode != 0:
@@ -589,6 +623,7 @@ class WorkflowRunner:
                 stage_label="test+pr",
                 post_progress=lambda text: self._post_thread(channel, thread_ts, text),
             )
+            update_ck_telemetry("test-pr")
             stdout = self._tail(proc.stdout, self._config.max_stdout_chars)
             stderr = self._tail(proc.stderr, self._config.max_stderr_chars)
             status = "completed" if proc.returncode == 0 else f"failed (exit {proc.returncode})"
@@ -728,3 +763,40 @@ class WorkflowRunner:
             if cmd[idx] == flag:
                 return cmd[idx + 1]
         return ""
+
+    def _extract_ck_commands_from_trajectory(self) -> list[str]:
+        traj_path = Path(self._config.mini_trajectory_path).expanduser()
+        if not traj_path.exists():
+            return []
+        try:
+            raw = traj_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except Exception:
+            return []
+
+        hits: list[str] = []
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                cmd_value = node.get("cmd")
+                if isinstance(cmd_value, str):
+                    trimmed = cmd_value.strip()
+                    if trimmed and self._is_ck_invocation(trimmed) and trimmed not in hits:
+                        hits.append(trimmed)
+                for value in node.values():
+                    walk(value)
+                return
+            if isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(data)
+        return hits
+
+    @staticmethod
+    def _is_ck_invocation(command_text: str) -> bool:
+        pattern = re.compile(
+            r"(^|\s)(ck|~/.ck/bin/ck|[^ \t\n\r]*ck\.exe)(\s|$)",
+            flags=re.IGNORECASE,
+        )
+        return bool(pattern.search(command_text))
