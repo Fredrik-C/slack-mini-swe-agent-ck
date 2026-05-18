@@ -2,7 +2,7 @@
   "default_repo": "myrepo",
   "repos": {
     "myrepo": {
-      "path": "/home/ubuntu/repos/myrepo",
+      "path": "/repos/myrepo",
       "default_branch": "main",
       "allowed_branches": [
         "main",

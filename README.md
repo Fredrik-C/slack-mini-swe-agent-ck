@@ -10,6 +10,7 @@ It does not require inbound webhooks or a public server URL.
 - Parses `repo=<alias>` and optional `branch=<name>` from the mention text.
 - Runs a workflow per task: plan => implement => review (iterate implement/review up to 3 total review passes) => test => create PR.
 - Uses separate `mini -t "<task>"` runs for plan, implement, review, and test/PR stages.
+- Injects a tooling guide into each phase prompt (language build/test matrix + Context King search protocol).
 - Creates a dedicated git worktree per task, runs in that worktree, then removes it.
 - If planning needs clarification, asks questions in the same Slack thread and resumes after user reply.
 - Posts completion status and output back to the same Slack thread.
@@ -21,8 +22,9 @@ If you do not want Python/.NET/Node SDKs installed on the Ubuntu host, run this 
 The included image contains:
 
 - Python runtime + pip
-- .NET SDK 10
-- Node.js + npm
+- .NET SDK 8/9/10 (side-by-side)
+- Node.js + npm + TypeScript CLI (`tsc`)
+- Context King CLI (`ck`)
 - git/bash/curl/jq
 
 Host requirement: Docker + Docker Compose only.
@@ -84,6 +86,8 @@ If this command prompts for credentials or fails, task runs may fail when resolv
 Clone this relay project and configure env:
 
 ```bash
+sudo mkdir -p /opt/mini-swe-slack
+sudo chown <user>:<group> /opt/mini-swe-slack
 git clone <your-repo-url> /opt/mini-swe-slack
 cd /opt/mini-swe-slack
 cp .env.example .env
@@ -251,6 +255,8 @@ Environment variables in `.env`:
 - `MINI_USE_YOLO` (default: `true`): append `-y` for automatic execution.
 - `MINI_EXIT_IMMEDIATELY` (default: `true`): append `--exit-immediately` so non-TTY runs do not block at REPL finish prompt.
 - `MSWEA_CONFIGURED` (recommended: `true`): disables mini's interactive first-time setup prompt for non-TTY Slack runs.
+- `MSWEA_COST_TRACKING` (default: `ignore_errors`): avoids OpenRouter runs failing when provider responses omit cost metadata.
+- `MINI_INFRA_RETRY_MAX` (default: `1`): retries known infrastructure-only mini failures (for example OpenRouter cost-tracking metadata failures).
 - `TASK_TIMEOUT_SECONDS` (default: `7200`): timeout per task.
 - `PROGRESS_HEARTBEAT_SECONDS` (default: `0`): post in-thread "still running" updates while planning/execution is active (`0` disables).
 - `STATUS_OUTPUT_CHARS` (default: `1200`): max output tail included in `status` responses.
@@ -265,6 +271,7 @@ Environment variables in `.env`:
 - `WORKFLOW_GUIDE_PATH` (default: `prompts/workflow.md`): markdown that defines required phase order and workflow expectations.
 - `PLAN_GUIDE_PATH` (default: `prompts/planning.md`): markdown that controls planning behavior and question quality.
 - `REVIEW_GUIDE_PATH` (default: `prompts/review.md`): markdown used for review quality bar.
+- `TOOLING_GUIDE_PATH` (default: `prompts/tooling.md`): markdown injected into all phases for language/runtime build-test guidance and Context King protocol usage.
 - `PLAN_OUTPUT_FILENAME` (default: `.mini_workflow_plan.json`): planning-stage JSON handshake file written inside each task worktree.
 - `REVIEW_OUTPUT_FILENAME` (default: `.mini_workflow_review.json`): review-stage JSON handshake file written inside each task worktree.
 - `MAX_IMPLEMENT_REVIEW_LOOPS` (default: `3`): max implement/review loop count before moving to test/PR.
@@ -281,6 +288,7 @@ Use OpenRouter directly with:
 - `MINI_MODEL_CLASS=openrouter`
 - `MINI_MODEL_NAME=<provider/model>` (example: `openai/gpt-4.1-mini`)
 - `OPENROUTER_API_KEY=sk-or-v1-...`
+- `MSWEA_COST_TRACKING=ignore_errors` (recommended for non-interactive relay runs)
 
 This relay does not require ChatGPT OAuth/device-login when using this route.
 
