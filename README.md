@@ -83,6 +83,26 @@ git -C /srv/agent/repos/platform fetch --all --prune
 
 If this command prompts for credentials or fails, task runs may fail when resolving branches/worktrees.
 
+Important with fresh-state policy:
+
+- The runner always executes `git fetch --all --prune` before creating a worktree.
+- `--all` fetches every configured remote (not just `origin`).
+- If any remote is HTTPS without non-interactive credentials, runs fail with errors like:
+  - `fatal: could not read Username for 'https://github.com': No such device or address`
+
+Recommended fix (SSH remotes):
+
+```bash
+git -C /srv/agent/repos/platform remote -v
+git -C /srv/agent/repos/platform remote set-url origin git@github.com:<owner>/<repo>.git
+git -C /srv/agent/repos/platform fetch --all --prune
+```
+
+Alternative fix (HTTPS):
+
+- Configure a non-interactive credential helper or token for the runtime user.
+- Ensure every configured remote can be fetched without prompt.
+
 
 ## 3) Configure This Relay Project
 
