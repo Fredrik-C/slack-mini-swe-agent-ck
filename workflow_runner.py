@@ -658,6 +658,19 @@ class WorkflowRunner:
                     ),
                 )
 
+            delivery_branch = self._create_delivery_branch(
+                worktree_path=wt_path,
+                base_branch=branch,
+                session_id=session_id,
+            )
+            self._post_thread(
+                channel,
+                thread_ts,
+                (
+                    "Created delivery branch for PR workflow.\n"
+                    f"base=`{branch}` delivery=`{delivery_branch}`"
+                ),
+            )
             self._post_thread(channel, thread_ts, "Stage: test + PR")
             test_pr_task = self._prompt_builder.build_test_pr_task(
                 user_task=task,
@@ -666,6 +679,8 @@ class WorkflowRunner:
                 review_guide=workflow_docs["review"],
                 tooling_guide=workflow_docs["tooling"],
                 plan_text=plan_text,
+                base_branch=branch,
+                delivery_branch=delivery_branch,
             )
             test_pr_cmd = self._mini_executor.build_command(test_pr_task, phase="implement")
             test_pr_summary = self._stage_command_summary(phase="test-pr", cmd=test_pr_cmd)
@@ -698,6 +713,7 @@ class WorkflowRunner:
                 delivery_issue = self._validate_delivery(
                     worktree_path=wt_path,
                     base_branch=branch,
+                    delivery_branch=delivery_branch,
                     stdout=proc.stdout,
                     stderr=proc.stderr,
                 )
@@ -941,11 +957,31 @@ class WorkflowRunner:
         )
         return bool(pattern.search(command_text))
 
+    def _create_delivery_branch(self, *, worktree_path: str, base_branch: str, session_id: str) -> str:
+        branch_slug = self._slugify_branch_name(base_branch)
+        session_slug = self._slugify_branch_name(session_id) if session_id else ""
+        suffix = session_slug or uuid.uuid4().hex[:8]
+        delivery_branch = f"mini-swe/{branch_slug}/{suffix}"
+        checkout_proc = self._run_quiet(["git", "-C", worktree_path, "checkout", "-B", delivery_branch])
+        if checkout_proc.returncode != 0:
+            details = (checkout_proc.stderr or checkout_proc.stdout).strip() or "no output"
+            raise RuntimeError(f"Failed to create delivery branch '{delivery_branch}': {details}")
+        return delivery_branch
+
+    @staticmethod
+    def _slugify_branch_name(value: str) -> str:
+        text = value.strip().lower()
+        text = re.sub(r"[^a-z0-9._/-]+", "-", text)
+        text = text.replace("//", "/")
+        text = text.strip("./-")
+        return text or "task"
+
     def _validate_delivery(
         self,
         *,
         worktree_path: str,
         base_branch: str,
+        delivery_branch: str,
         stdout: str,
         stderr: str,
     ) -> str:
@@ -968,6 +1004,31 @@ class WorkflowRunner:
         if head_sha == base_sha:
             return (
                 "Delivery check failed: HEAD equals origin base branch, so no new committed deliverable was produced."
+            )
+
+        current_branch_proc = self._run_quiet(["git", "-C", worktree_path, "branch", "--show-current"])
+        if current_branch_proc.returncode != 0:
+            return "Delivery check failed: unable to resolve current local branch after test/PR stage."
+        current_branch = current_branch_proc.stdout.strip()
+        if current_branch != delivery_branch:
+            return (
+                "Delivery check failed: test/PR stage was expected to stay on delivery branch "
+                f"'{delivery_branch}' but ended on '{current_branch or '(detached)'}'."
+            )
+
+        delivery_proc = self._run_quiet(
+            ["git", "-C", worktree_path, "rev-parse", f"origin/{delivery_branch}"]
+        )
+        if delivery_proc.returncode != 0:
+            return (
+                "Delivery check failed: delivery branch was not pushed to remote "
+                f"(missing origin/{delivery_branch})."
+            )
+        delivery_sha = delivery_proc.stdout.strip()
+        if delivery_sha != head_sha:
+            return (
+                "Delivery check failed: remote delivery branch is out of sync with local HEAD. "
+                f"Expected origin/{delivery_branch} to equal HEAD."
             )
 
         combined = f"{stdout}\n{stderr}"

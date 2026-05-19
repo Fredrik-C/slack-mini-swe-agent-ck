@@ -11,6 +11,7 @@ It does not require inbound webhooks or a public server URL.
 - Receives `app_mention` events in Slack.
 - Parses `repo=<alias>` and optional `branch=<name>` from the mention text.
 - Runs a workflow per task: plan => implement => review (iterate implement/review up to 3 total review passes) => test => create PR.
+- Treats requested `branch=` as PR base branch, then creates an ephemeral delivery branch for test/PR.
 - Uses separate `mini -t "<task>"` runs for plan, implement, review, and test/PR stages.
 - Injects a tooling guide into each phase prompt (language build/test matrix + Context King search protocol).
 - Creates a dedicated git worktree per task, runs in that worktree, then removes it.
@@ -223,7 +224,7 @@ If planning needs clarification, the bot asks follow-up questions in the same th
 Reply in that thread and mention the bot with your answers to resume execution.
 Use `@your-bot cancel` in that thread to abort a pending clarification flow.
 
-`branch=` is optional; if omitted, `default_branch` from `repos.json` is used.
+`branch=` is optional; if omitted, `default_branch` from `repos.json` is used. This value is the PR base branch.
 
 If `repo=` is omitted, `default_repo` from `repos.json` is used.
 
@@ -339,6 +340,7 @@ Notes:
 
 - Only repos declared in `repos.json` are allowed.
 - Branch is checked against `allowed_branches` patterns in the selected repo config.
+- During test/PR, the runner creates a dedicated delivery branch from the selected base branch and blocks successful completion if the base branch is pushed directly.
 - Each task gets an isolated worktree path and does not reuse previous task filesystem state.
 - During planning, the bot may pause and ask clarifying questions; reply in-thread with `@your-bot <answers>`.
 - Use `repos`/`list repos` to see current aliases and allowed branch patterns from config.

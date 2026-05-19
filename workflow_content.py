@@ -199,6 +199,8 @@ Hard requirements for this phase:
         review_guide: str,
         tooling_guide: str,
         plan_text: str,
+        base_branch: str,
+        delivery_branch: str,
     ) -> str:
         return f"""
 Follow this required workflow exactly:
@@ -220,11 +222,14 @@ User clarifications:
 Execution requirements for this phase:
 1. Do not make broad feature changes unless required to fix failing tests or review-identified defects.
 2. Run relevant tests/verification commands.
-3. Create a PR if tooling/auth allows it.
-4. If PR is created, include the full PR URL in output.
-5. If PR cannot be created, include a clear blocker line that starts with `BLOCKER:` and include exact command/output.
-6. Do not `cd` outside the current working directory/worktree. Do not run commands against `/repos/...` paths.
-7. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+3. You are already on delivery branch `{delivery_branch}`. Keep commits on this branch only.
+4. NEVER push directly to `{base_branch}` (or its remote ref). This run must not update the base branch directly.
+5. Push delivery branch with upstream, for example: `git push -u origin {delivery_branch}`.
+6. Create a PR from `{delivery_branch}` into `{base_branch}` if tooling/auth allows it.
+7. If PR is created, include the full PR URL in output.
+8. If PR cannot be created, include a clear blocker line that starts with `BLOCKER:` and include exact command/output.
+9. Do not `cd` outside the current working directory/worktree. Do not run commands against `/repos/...` paths.
+10. End with: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
 """.strip()
 
 
